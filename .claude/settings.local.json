@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -lR \"d:\\\\Python\\\\Projects\\\\Intelligent SaaS Education ERP & Scheduling System\")",
+      "Bash(find \"d:\\\\Python\\\\Projects\\\\Intelligent SaaS Education ERP & Scheduling System\" -name \"requirements*.txt\" -o -name \"setup.py\" -o -name \"setup.cfg\" -o -name \"pyproject.toml\" -o -name \"Pipfile\")",
+      "Bash(find \"d:\\\\Python\\\\Projects\\\\Intelligent SaaS Education ERP & Scheduling System\" -maxdepth 1 -type f)",
+      "Bash(find \"d:\\\\Python\\\\Projects\\\\Intelligent SaaS Education ERP & Scheduling System\" -maxdepth 1 -type f \\\\\\( -name \"README*\" -o -name \"*.md\" \\\\\\))",
+      "Bash(ls -la \"d:\\\\Python\\\\Projects\\\\Intelligent SaaS Education ERP & Scheduling System/\")"
+    ]
+  }
+}

@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
-                     Substitution, AuditLog)
+                     Substitution, AuditLog,
+                     LoadSheet, TeacherLoad, LoadDistribution)
 
 
 class TeacherSerializer(serializers.ModelSerializer):
@@ -20,14 +21,48 @@ class TeacherBusyTimeSerializer(serializers.ModelSerializer):
     class Meta:
         model = TeacherBusyTime
         fields = ['id', 'teacher', 'teacher_name', 'date',
-                  'start_time', 'end_time', 'reason']
+                  'is_all_day', 'start_time', 'end_time', 'reason']
         read_only_fields = ['id']
 
     def validate(self, data):
-        if data['start_time'] >= data['end_time']:
-            raise serializers.ValidationError(
-                "Boshlanish vaqti tugash vaqtidan oldin bo'lishi kerak!"
-            )
+        is_all_day  = data.get('is_all_day', False)
+        start_time  = data.get('start_time')
+        end_time    = data.get('end_time')
+
+        # Butun kun emas bo'lsa — vaqtlar majburiy
+        if not is_all_day:
+            if not start_time or not end_time:
+                raise serializers.ValidationError(
+                    "is_all_day=False bo'lganda start_time va end_time majburiy!"
+                )
+            if start_time >= end_time:
+                raise serializers.ValidationError(
+                    "Boshlanish vaqti tugash vaqtidan oldin bo'lishi kerak!"
+                )
+
+        # Bir xil sana + o'qituvchi uchun qoplanish tekshiruvi
+        teacher = data.get('teacher')
+        date    = data.get('date')
+        instance_id = self.instance.id if self.instance else None
+
+        if teacher and date:
+            existing = TeacherBusyTime.objects.filter(
+                teacher=teacher, date=date
+            ).exclude(pk=instance_id)
+
+            for bt in existing:
+                # Yangi yozuv ham, mavjud ham butun kun → conflict
+                if is_all_day or bt.is_all_day:
+                    raise serializers.ValidationError(
+                        f"{date} kuni uchun allaqachon band vaqt mavjud!"
+                    )
+                # Ikki oraliq qoplanadimi?
+                if start_time and end_time and bt.start_time and bt.end_time:
+                    if start_time < bt.end_time and end_time > bt.start_time:
+                        raise serializers.ValidationError(
+                            f"{date} kuni {bt.start_time.strftime('%H:%M')}-"
+                            f"{bt.end_time.strftime('%H:%M')} bilan qoplanish bor!"
+                        )
         return data
 
 
@@ -149,3 +184,57 @@ class AuditLogSerializer(serializers.ModelSerializer):
                   'action', 'action_display', 'model_name',
                   'object_id', 'object_repr', 'changes', 'timestamp']
         read_only_fields = fields
+
+
+# ─────────────────────────────────────────────
+#  TAQSIMOT SERIALIZERS
+# ─────────────────────────────────────────────
+
+class LoadDistributionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = LoadDistribution
+        fields = ['id', 'module_name', 'group_name', 'hours',
+                  'curriculum_subject', 'group']
+        read_only_fields = fields
+
+
+class TeacherLoadSerializer(serializers.ModelSerializer):
+    distributions   = LoadDistributionSerializer(many=True, read_only=True)
+    stavka_display  = serializers.CharField(source='get_stavka_display', read_only=True)
+
+    class Meta:
+        model  = TeacherLoad
+        fields = ['id', 'full_name', 'position', 'stavka', 'stavka_display',
+                  'total_hours', 'teacher', 'distributions']
+        read_only_fields = fields
+
+
+class LoadSheetSerializer(serializers.ModelSerializer):
+    department_name = serializers.CharField(source='department.name', read_only=True)
+    uploaded_by_name= serializers.CharField(source='uploaded_by.get_full_name', read_only=True)
+    teacher_loads   = TeacherLoadSerializer(many=True, read_only=True)
+    month_display   = serializers.SerializerMethodField()
+    total_teachers  = serializers.SerializerMethodField()
+    total_hours     = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = LoadSheet
+        fields = ['id', 'department', 'department_name', 'month', 'month_display',
+                  'year', 'notes', 'uploaded_by', 'uploaded_by_name',
+                  'uploaded_at', 'total_teachers', 'total_hours', 'teacher_loads']
+        read_only_fields = fields
+
+    def get_month_display(self, obj):
+        months = {
+            1: 'Yanvar',  2: 'Fevral',  3: 'Mart',
+            4: 'Aprel',   5: 'May',     6: 'Iyun',
+            7: 'Iyul',    8: 'Avgust',  9: 'Sentabr',
+            10: 'Oktabr', 11: 'Noyabr', 12: 'Dekabr'
+        }
+        return months.get(obj.month, '')
+
+    def get_total_teachers(self, obj):
+        return obj.teacher_loads.exclude(stavka=TeacherLoad.Stavka.VACANT).count()
+
+    def get_total_hours(self, obj):
+        return sum(t.total_hours for t in obj.teacher_loads.all())

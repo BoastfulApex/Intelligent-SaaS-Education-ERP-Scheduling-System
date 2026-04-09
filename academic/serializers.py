@@ -21,41 +21,64 @@ class SubjectSerializer(serializers.ModelSerializer):
 
 
 class CurriculumSubjectSerializer(serializers.ModelSerializer):
-    subject_name        = serializers.CharField(source='subject.name', read_only=True)
-    lesson_type_display = serializers.CharField(source='get_lesson_type_display', read_only=True)
-    total_paras         = serializers.IntegerField(read_only=True)
+    subject_name      = serializers.CharField(source='subject.name', read_only=True)
+    subject_code      = serializers.CharField(source='subject.code', read_only=True)
+    department_name   = serializers.CharField(source='department.name', read_only=True)
+    auditorium_hours  = serializers.IntegerField(read_only=True)
+    grand_total_hours = serializers.IntegerField(read_only=True)
+    total_paras       = serializers.IntegerField(read_only=True)
+    weekly_total      = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = CurriculumSubject
-        fields = ['id', 'block', 'subject', 'subject_name',
-                  'lesson_type', 'lesson_type_display',
-                  'total_hours', 'total_paras']
-        read_only_fields = ['id', 'total_paras']
+        fields = [
+            'id', 'block', 'subject', 'subject_name', 'subject_code',
+            'department', 'department_name',
+            'order',
+            'lecture_hours', 'practice_hours', 'field_hours', 'independent_hours',
+            'auditorium_hours', 'grand_total_hours', 'total_paras',
+            'week1_hours', 'week2_hours', 'week3_hours', 'week4_hours', 'weekly_total',
+        ]
+        read_only_fields = ['id', 'auditorium_hours', 'grand_total_hours', 'total_paras', 'weekly_total']
 
 
 class CurriculumBlockSerializer(serializers.ModelSerializer):
-    department_name = serializers.CharField(source='department.name', read_only=True)
-    subjects        = CurriculumSubjectSerializer(many=True, read_only=True)
-    total_hours     = serializers.IntegerField(read_only=True)
-    total_paras     = serializers.IntegerField(read_only=True)
+    subjects          = CurriculumSubjectSerializer(many=True, read_only=True)
+    total_hours       = serializers.IntegerField(read_only=True)
+    lecture_hours     = serializers.IntegerField(read_only=True)
+    practice_hours    = serializers.IntegerField(read_only=True)
+    field_hours       = serializers.IntegerField(read_only=True)
+    independent_hours = serializers.IntegerField(read_only=True)
+    total_paras       = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = CurriculumBlock
-        fields = ['id', 'curriculum', 'department', 'department_name',
-                  'order', 'subjects', 'total_hours', 'total_paras']
-        read_only_fields = ['id', 'total_hours', 'total_paras']
+        fields = [
+            'id', 'curriculum', 'order', 'name',
+            'subjects',
+            'total_hours', 'lecture_hours', 'practice_hours',
+            'field_hours', 'independent_hours', 'total_paras',
+        ]
+        read_only_fields = ['id', 'total_hours', 'lecture_hours', 'practice_hours',
+                            'field_hours', 'independent_hours', 'total_paras']
 
 
 class CurriculumSerializer(serializers.ModelSerializer):
-    major_name     = serializers.CharField(source='major.name', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    blocks         = CurriculumBlockSerializer(many=True, read_only=True)
+    major_name         = serializers.CharField(source='major.name', read_only=True)
+    status_display     = serializers.CharField(source='get_status_display', read_only=True)
+    study_form_display = serializers.CharField(source='get_study_form_display', read_only=True)
+    blocks             = CurriculumBlockSerializer(many=True, read_only=True)
 
     class Meta:
         model = Curriculum
-        fields = ['id', 'major', 'major_name', 'name',
-                  'status', 'status_display', 'blocks',
-                  'created_at', 'updated_at']
+        fields = [
+            'id', 'major', 'major_name', 'name',
+            'contingent', 'study_form', 'study_form_display',
+            'duration_weeks', 'total_hours',
+            'status', 'status_display',
+            'blocks',
+            'created_at', 'updated_at',
+        ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 

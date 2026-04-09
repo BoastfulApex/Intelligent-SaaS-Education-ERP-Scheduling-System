@@ -36,6 +36,8 @@ class Room(models.Model):
         LECTURE = 'lecture', "Ma'ruza zali"
         LAB     = 'lab',     'Laboratoriya'
         SEMINAR = 'seminar', 'Seminar xonasi'
+        GYM      = 'gym',      'Sport zal'
+        COMPUTER = 'computer', 'Kompyuter xonasi'
 
     building  = models.ForeignKey(Building, on_delete=models.CASCADE, related_name='rooms')
     name      = models.CharField(max_length=100, verbose_name="Xona nomi")

@@ -1,6 +1,148 @@
 from django.db import models
 
 
+# ─────────────────────────────────────────────
+#  YUKLAMA TAQSIMOTI  (Taqsimot Excel → DB)
+# ─────────────────────────────────────────────
+
+class LoadSheet(models.Model):
+    """
+    Kafedra mudiri yuklagan oylik taqsimot varag'i.
+    Bitta yuklama = bitta department + bitta oy.
+    Qayta yuklansa avvalgisi o'chiriladi.
+    """
+    department  = models.ForeignKey(
+        'organizations.Department',
+        on_delete=models.CASCADE,
+        related_name='load_sheets',
+        verbose_name="Kafedra"
+    )
+    month       = models.PositiveSmallIntegerField(verbose_name="Oy (1-12)")
+    year        = models.PositiveIntegerField(verbose_name="Yil")
+    uploaded_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='uploaded_load_sheets',
+        verbose_name="Yuklagan"
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    notes       = models.TextField(blank=True, verbose_name="Izoh")
+
+    class Meta:
+        db_table = 'load_sheets'
+        verbose_name = "Taqsimot varag'i"
+        verbose_name_plural = "Taqsimot varaqlari"
+        unique_together = ['department', 'month', 'year']
+        ordering = ['-year', '-month']
+
+    def __str__(self):
+        return f"{self.department} | {self.month}/{self.year}"
+
+
+class TeacherLoad(models.Model):
+    """
+    O'qituvchining bir oylik yig'indi yuklamasi.
+    Excel faylining bir T/r qatori + unga tegishli barcha modullar.
+    """
+    class Stavka(models.TextChoices):
+        FULL    = '1.0',     "To'liq stavka (1.0)"
+        HALF    = '0.5',     "Yarim stavka (0.5)"
+        QUARTER = '0.25',    "Chorak stavka (0.25)"
+        HOURLY  = 'soatbay', "Soatbay"
+        VACANT  = 'vokant',  "Vokant (bo'sh o'rin)"
+
+    load_sheet  = models.ForeignKey(
+        LoadSheet,
+        on_delete=models.CASCADE,
+        related_name='teacher_loads',
+        verbose_name="Taqsimot varag'i"
+    )
+    teacher     = models.ForeignKey(
+        'scheduling.Teacher',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='load_records',
+        verbose_name="O'qituvchi"
+    )
+    full_name   = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name="F.I.Sh (Excel dan)",
+        help_text="Teacher topilmasa ham Excel dagi ism saqlanadi"
+    )
+    position    = models.CharField(max_length=100, blank=True, verbose_name="Lavozim")
+    stavka      = models.CharField(
+        max_length=20,
+        choices=Stavka.choices,
+        default=Stavka.FULL,
+        verbose_name="Stavka"
+    )
+    total_hours = models.PositiveSmallIntegerField(default=0, verbose_name="Jami soat (Hammasi)")
+
+    class Meta:
+        db_table = 'teacher_loads'
+        verbose_name = "O'qituvchi oylik yuklamasi"
+        verbose_name_plural = "O'qituvchilar oylik yuklamalari"
+
+    def __str__(self):
+        name = self.full_name or str(self.teacher)
+        return f"{self.load_sheet} | {name} | {self.total_hours} soat"
+
+
+class LoadDistribution(models.Model):
+    """
+    Taqsimotning eng mayda birligi:
+    1 yozuv = 1 o'qituvchi + 1 fan/modul + 1 guruh + soat soni.
+    Excel faylidagi bitta katak qiymatiga mos.
+    """
+    teacher_load       = models.ForeignKey(
+        TeacherLoad,
+        on_delete=models.CASCADE,
+        related_name='distributions',
+        verbose_name="O'qituvchi yuklamasi"
+    )
+    curriculum_subject = models.ForeignKey(
+        'academic.CurriculumSubject',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='load_distributions',
+        verbose_name="O'quv rejadagi fan"
+    )
+    module_name        = models.CharField(
+        max_length=255,
+        verbose_name="Modul nomi (Excel dan)",
+        help_text="CurriculumSubject topilmasa ham saqlanadi"
+    )
+    group              = models.ForeignKey(
+        'academic.Group',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='load_distributions',
+        verbose_name="Guruh"
+    )
+    group_name         = models.CharField(
+        max_length=100,
+        verbose_name="Guruh nomi (Excel dan)",
+        help_text="Group topilmasa ham saqlanadi"
+    )
+    hours              = models.PositiveSmallIntegerField(verbose_name="Soat soni")
+
+    class Meta:
+        db_table = 'load_distributions'
+        verbose_name = "Taqsimot elementi"
+        verbose_name_plural = "Taqsimot elementlari"
+        ordering = ['teacher_load', 'module_name', 'group_name']
+
+    def __str__(self):
+        return (
+            f"{self.teacher_load.full_name} | "
+            f"{self.module_name} | "
+            f"{self.group_name} | "
+            f"{self.hours} soat"
+        )
+
+
 class Teacher(models.Model):
     user          = models.OneToOneField('accounts.User', on_delete=models.CASCADE, related_name='teacher_profile')
     organization  = models.ForeignKey('organizations.Organization', on_delete=models.CASCADE, related_name='teachers')
@@ -21,11 +163,27 @@ class TeacherBusyTime(models.Model):
     O'qituvchining BAND vaqtlari.
     Kafedra mudiri kiritadi.
     Qolgan barcha vaqt = bo'sh.
+
+    is_all_day=True bo'lsa, o'sha kunda hech qanday dars qo'yilmaydi.
+    is_all_day=False bo'lsa, start_time..end_time oralig'i band hisoblanadi.
     """
     teacher    = models.ForeignKey(Teacher, on_delete=models.CASCADE, related_name='busy_times')
     date       = models.DateField(verbose_name="Sana")
-    start_time = models.TimeField(verbose_name="Boshlanish vaqti")
-    end_time   = models.TimeField(verbose_name="Tugash vaqti")
+    is_all_day = models.BooleanField(
+        default=False,
+        verbose_name="Butun kun band",
+        help_text="Belgilansa, o'sha kunda hech qanday para qo'yilmaydi"
+    )
+    start_time = models.TimeField(
+        null=True, blank=True,
+        verbose_name="Boshlanish vaqti",
+        help_text="is_all_day=False bo'lganda to'ldirish shart"
+    )
+    end_time   = models.TimeField(
+        null=True, blank=True,
+        verbose_name="Tugash vaqti",
+        help_text="is_all_day=False bo'lganda to'ldirish shart"
+    )
     reason     = models.CharField(max_length=255, blank=True, verbose_name="Sabab")
 
     class Meta:
@@ -35,6 +193,8 @@ class TeacherBusyTime(models.Model):
         ordering = ['date', 'start_time']
 
     def __str__(self):
+        if self.is_all_day:
+            return f"{self.teacher} | {self.date} | Butun kun"
         return (
             f"{self.teacher} | "
             f"{self.date} | "
@@ -42,11 +202,16 @@ class TeacherBusyTime(models.Model):
             f"{self.end_time.strftime('%H:%M')}"
         )
 
-    def is_conflict(self, date, para):
+    def is_conflict(self, date, para) -> bool:
         """
         Para vaqti band vaqt bilan to'qnashadimi?
+        Butun kun band bo'lsa — har qanday para to'qnashadi.
         """
         if self.date != date:
+            return False
+        if self.is_all_day:
+            return True
+        if not self.start_time or not self.end_time:
             return False
         return (
             self.start_time <= para.start_time < self.end_time or

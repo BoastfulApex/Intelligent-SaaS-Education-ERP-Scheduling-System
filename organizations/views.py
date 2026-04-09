@@ -3,11 +3,12 @@ from rest_framework.permissions import IsAuthenticated
 from .models import Organization, Building, Room, Department
 from .serializers import OrganizationSerializer, BuildingSerializer, RoomSerializer, DepartmentSerializer
 from accounts.models import User
+from permissions import IsSuperAdmin, IsOrgAdmin, IsOrgAdminOrReadOnly
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
     serializer_class = OrganizationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsSuperAdmin]
 
     def get_queryset(self):
         user = self.request.user
@@ -18,7 +19,7 @@ class OrganizationViewSet(viewsets.ModelViewSet):
 
 class BuildingViewSet(viewsets.ModelViewSet):
     serializer_class = BuildingSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOrgAdmin]
 
     def get_queryset(self):
         return Building.objects.filter(
@@ -31,17 +32,17 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
 class RoomViewSet(viewsets.ModelViewSet):
     serializer_class = RoomSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOrgAdmin]
 
     def get_queryset(self):
         return Room.objects.filter(
             building__organization=self.request.user.organization
         )
-        
+
 
 class DepartmentViewSet(viewsets.ModelViewSet):
     serializer_class = DepartmentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOrgAdminOrReadOnly]
 
     def get_queryset(self):
         return Department.objects.filter(

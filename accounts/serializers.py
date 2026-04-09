@@ -17,6 +17,30 @@ class UserCreateSerializer(serializers.ModelSerializer):
         model = User
         fields = ['username', 'first_name', 'last_name', 'email',
                   'role', 'organization', 'phone', 'password']
+        extra_kwargs = {
+            # organization ViewSet.perform_create da o'rnatiladi,
+            # shuning uchun majburiy emas
+            'organization': {'required': False},
+        }
+
+    def validate_role(self, value):
+        """
+        Rol eskalatsiyasini oldini olish:
+          - super_admin → istalgan rol bera oladi
+          - org_admin   → faqat o'z tashkiloti uchun, super_admin bera olmaydi
+        """
+        request = self.context.get('request')
+        if not request:
+            return value
+        requester = request.user
+        if (
+            requester.role == User.Role.ORG_ADMIN
+            and value == User.Role.SUPER_ADMIN
+        ):
+            raise serializers.ValidationError(
+                "Org_admin super_admin roli bera olmaydi!"
+            )
+        return value
 
     def create(self, validated_data):
         password = validated_data.pop('password')

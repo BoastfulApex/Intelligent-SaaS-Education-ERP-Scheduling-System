@@ -1,7 +1,8 @@
 from django.contrib import admin
 from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
-                     Substitution, AuditLog)
+                     Substitution, AuditLog,
+                     LoadSheet, TeacherLoad, LoadDistribution)
 
 
 class TeacherBusyTimeInline(admin.TabularInline):
@@ -84,3 +85,62 @@ class AuditLogAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+# ─────────────────────────────────────────────
+#  TAQSIMOT ADMIN
+# ─────────────────────────────────────────────
+
+class LoadDistributionInline(admin.TabularInline):
+    model         = LoadDistribution
+    extra         = 0
+    readonly_fields = ['module_name', 'group_name', 'hours', 'curriculum_subject', 'group']
+    can_delete    = False
+
+
+class TeacherLoadInline(admin.TabularInline):
+    model         = TeacherLoad
+    extra         = 0
+    readonly_fields = ['full_name', 'position', 'stavka', 'total_hours', 'teacher']
+    can_delete    = False
+    show_change_link = True
+
+
+@admin.register(LoadSheet)
+class LoadSheetAdmin(admin.ModelAdmin):
+    list_display    = ['department', 'month', 'year', 'uploaded_by',
+                       'uploaded_at', 'get_teachers_count', 'get_total_hours']
+    list_filter     = ['year', 'month', 'department']
+    readonly_fields = ['uploaded_by', 'uploaded_at']
+    inlines         = [TeacherLoadInline]
+
+    def get_teachers_count(self, obj):
+        return obj.teacher_loads.exclude(
+            stavka=TeacherLoad.Stavka.VACANT
+        ).count()
+    get_teachers_count.short_description = "O'qituvchilar"
+
+    def get_total_hours(self, obj):
+        return sum(t.total_hours for t in obj.teacher_loads.all())
+    get_total_hours.short_description = "Jami soat"
+
+
+@admin.register(TeacherLoad)
+class TeacherLoadAdmin(admin.ModelAdmin):
+    list_display    = ['full_name', 'position', 'stavka', 'total_hours',
+                       'teacher', 'load_sheet']
+    list_filter     = ['stavka', 'load_sheet__month', 'load_sheet__year',
+                       'load_sheet__department']
+    search_fields   = ['full_name']
+    readonly_fields = ['teacher']
+    inlines         = [LoadDistributionInline]
+
+
+@admin.register(LoadDistribution)
+class LoadDistributionAdmin(admin.ModelAdmin):
+    list_display  = ['teacher_load', 'module_name', 'group_name', 'hours',
+                     'curriculum_subject', 'group']
+    list_filter   = ['teacher_load__load_sheet__month',
+                     'teacher_load__load_sheet__year',
+                     'teacher_load__load_sheet__department']
+    search_fields = ['module_name', 'group_name', 'teacher_load__full_name']

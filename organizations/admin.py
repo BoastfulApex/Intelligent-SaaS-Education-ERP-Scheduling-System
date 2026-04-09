@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Organization, Building, Room
+from .models import Organization, Building, Room, Department
 
 
 class RoomInline(admin.TabularInline):
@@ -30,3 +30,11 @@ class BuildingAdmin(admin.ModelAdmin):
 class RoomAdmin(admin.ModelAdmin):
     list_display = ['name', 'building', 'room_type', 'capacity', 'is_active']
     list_filter = ['room_type', 'is_active']
+
+
+@admin.register(Department)
+class DepartmentAdmin(admin.ModelAdmin):
+    list_display  = ['name', 'organization', 'manager', 'is_active']
+    list_filter   = ['organization', 'is_active']
+    search_fields = ['name']
+    raw_id_fields = ['manager']

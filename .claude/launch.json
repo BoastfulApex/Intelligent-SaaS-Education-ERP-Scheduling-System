@@ -1,0 +1,26 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Django API Server",
+      "runtimeExecutable": "D:\Python\Projects\Intelligent SaaS Education ERP & Scheduling System\venv\Scripts\python.exe",
+      "runtimeArgs": [
+        "D:\Python\Projects\Intelligent SaaS Education ERP & Scheduling System\manage.py",
+        "runserver",
+        "8000"
+      ],
+      "cwd": "D:\Python\Projects\Intelligent SaaS Education ERP & Scheduling System",
+      "port": 8000
+    },
+    {
+      "name": "Vite Frontend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "D:\Frontend\Sportedu\SaaS Education ERP & Scheduling System\node_modules\vite\bin\vite.js",
+        "--host"
+      ],
+      "cwd": "D:\Frontend\Sportedu\SaaS Education ERP & Scheduling System",
+      "port": 5173
+    }
+  ]
+}
