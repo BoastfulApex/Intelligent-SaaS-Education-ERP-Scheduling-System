@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import (Major, Subject, Curriculum, CurriculumBlock,
-                     CurriculumSubject, Group, Shift, Para, GroupAssignment)
+                     CurriculumSubject, Group, Shift, Para, GroupAssignment,
+                     GroupDayAssignment)
 
 
 class MajorSerializer(serializers.ModelSerializer):
@@ -16,7 +17,7 @@ class SubjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subject
         fields = ['id', 'organization', 'name', 'code',
-                  'department', 'department_name']
+                  'department', 'department_name', 'requires_computer_room']
         read_only_fields = ['id', 'organization']
 
 
@@ -146,14 +147,12 @@ class GroupAssignmentSerializer(serializers.ModelSerializer):
         }
         return months.get(obj.month, '')
 
-    def validate(self, data):
-        exists = GroupAssignment.objects.filter(
-            group=data['group'],
-            month=data['month'],
-            year=data['year']
-        ).exclude(pk=self.instance.pk if self.instance else None).exists()
-        if exists:
-            raise serializers.ValidationError(
-                "Bu guruh uchun bu oyda allaqachon smena va bino biriktirilgan!"
-            )
-        return data
+
+class GroupDayAssignmentSerializer(serializers.ModelSerializer):
+    shift_name    = serializers.CharField(source='shift.name', read_only=True)
+    building_name = serializers.CharField(source='building.name', read_only=True)
+
+    class Meta:
+        model  = GroupDayAssignment
+        fields = ['id', 'group', 'date', 'shift', 'shift_name', 'building', 'building_name']
+        read_only_fields = ['id']

@@ -146,6 +146,13 @@ class LoadDistribution(models.Model):
 class Teacher(models.Model):
     user          = models.OneToOneField('accounts.User', on_delete=models.CASCADE, related_name='teacher_profile')
     organization  = models.ForeignKey('organizations.Organization', on_delete=models.CASCADE, related_name='teachers')
+    department    = models.ForeignKey(
+        'organizations.Department',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='teachers',
+        verbose_name="Kafedra"
+    )
     subjects      = models.ManyToManyField('academic.Subject', blank=True, verbose_name="O'qita oladigan fanlar")
     personal_room = models.ForeignKey('organizations.Room', on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Shaxsiy xona")
     is_active     = models.BooleanField(default=True)
@@ -428,3 +435,38 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f"[{self.timestamp:%d.%m.%Y %H:%M}] {self.user} | {self.get_action_display()} | {self.model_name}"
+
+
+class SubjectTeacher(models.Model):
+    """
+    O'quv reja fani (CurriculumSubject) ga o'qituvchi biriktiruvi.
+    Kafedra mudiri taqsimot sahifasida to'g'ridan-to'g'ri belgilaydi.
+    """
+    curriculum_subject = models.OneToOneField(
+        'academic.CurriculumSubject',
+        on_delete=models.CASCADE,
+        related_name='teacher_assignment',
+        verbose_name="O'quv reja fani"
+    )
+    teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='direct_subject_assignments',
+        verbose_name="O'qituvchi"
+    )
+    assigned_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='subject_teacher_assignments'
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'subject_teachers'
+        verbose_name = "Fan o'qituvchisi"
+        verbose_name_plural = "Fan o'qituvchilari"
+
+    def __str__(self):
+        return f"{self.curriculum_subject} → {self.teacher}"

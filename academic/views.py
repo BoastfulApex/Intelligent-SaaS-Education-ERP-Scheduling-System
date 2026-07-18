@@ -7,13 +7,17 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.db import transaction
 from .models import (Major, Subject, Curriculum, CurriculumBlock,
-                     CurriculumSubject, Group, Shift, Para, GroupAssignment)
+                     CurriculumSubject, Group, Shift, Para, GroupAssignment,
+                     GroupDayAssignment)
 from .serializers import (MajorSerializer, SubjectSerializer,
                            CurriculumSerializer, CurriculumBlockSerializer,
                            CurriculumSubjectSerializer, GroupSerializer,
                            ShiftSerializer, ParaSerializer,
-                           GroupAssignmentSerializer)
-from permissions import IsEduAdmin, IsOrgAdmin, IsOrgAdminOrReadOnly, IsEduAdminOrReadOnly
+                           GroupAssignmentSerializer, GroupDayAssignmentSerializer)
+from permissions import (
+    IsEduAdmin, IsOrgAdmin, IsOrgAdminOrReadOnly, IsEduAdminOrReadOnly,
+    IsEduAdminOrMethodist, IsEduAdminWriteMethodistRead,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -22,25 +26,109 @@ from permissions import IsEduAdmin, IsOrgAdmin, IsOrgAdminOrReadOnly, IsEduAdmin
 
 ROMAN = {'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'}
 
+_ERR_WRONG_FORMAT = (
+    "Xato fayl yuklandi! Ushbu fayl qo'llab-quvvatlanmaydigan formatda. "
+    "Faqat rasmiy shablon faylidan foydalaning (oquv_reja_shablon.xlsx)."
+)
+
+def _validate_template(df) -> tuple[bool, str]:
+    """
+    Faylning to'g'ri shablon ekanligini STRUKTURAVIY tekshiradi.
+    Kirill matn taqqoslashidan foydalanmaydi (encoding farqlari muammosi).
+
+    Tekshiruvlar:
+      1. Fayl kamida 5 qator va 8 ustundan iborat bo'lishi kerak
+      2. Kamida bitta Roman raqamli blok qatori (I., II., ...) mavjud bo'lishi kerak
+      3. Blok qatoridan keyin "1.1.", "1.2." ko'rinishidagi fan qatorlari bo'lishi kerak
+      4. Kamida 2 ta Roman blok bo'lishi kerak (I., II. kabi)
+    """
+    _WRONG = _ERR_WRONG_FORMAT
+
+    # 1. Minimum o'lcham tekshiruvi
+    if df.shape[0] < 5:
+        return False, _WRONG
+    if df.shape[1] < 8:
+        return False, _WRONG
+
+    # 2. Roman raqamli blok qatorini topish
+    data_start = _find_data_start(df)
+    if data_start < 0:
+        return False, (
+            "Xato fayl yuklandi! Faylda blok qatorlari (I., II., III. ...) "
+            "topilmadi. To'g'ri shablon formatini yuklang."
+        )
+
+    # 3. Blok va fan qatorlari soni tekshiruvi
+    block_count   = 0
+    subject_count = 0
+    col_offset = 0
+    if df.shape[1] > 1 and _is_block_row(df.iloc[data_start, 1]):
+        col_offset = 1
+
+    for i in range(data_start, min(data_start + 60, df.shape[0])):
+        v = df.iloc[i, col_offset] if df.shape[1] > col_offset else None
+        if _is_block_row(v):
+            block_count += 1
+        elif _is_subject_row(v):
+            subject_count += 1
+        elif _is_total_row(v):
+            break
+        # name_val ustunida total tekshiruvi
+        name_v = df.iloc[i, col_offset + 1] if df.shape[1] > col_offset + 1 else None
+        if _is_total_row(name_v):
+            break
+
+    if block_count < 1:
+        return False, _WRONG
+    if subject_count < 1:
+        return False, _WRONG
+
+    return True, ''
+
+
 def _is_block_row(tr_val) -> bool:
     """I., II., III., IV. — blok qatori."""
-    if pd.isna(tr_val):
+    if tr_val is None:
         return False
+    try:
+        if pd.isna(tr_val):
+            return False
+    except (TypeError, ValueError):
+        pass
     s = str(tr_val).strip().rstrip('.')
     return s in ROMAN
 
 def _is_subject_row(tr_val) -> bool:
     """1.1., 2.3. — fan qatori."""
-    if pd.isna(tr_val):
+    if tr_val is None:
         return False
+    try:
+        if pd.isna(tr_val):
+            return False
+    except (TypeError, ValueError):
+        pass
     s = str(tr_val).strip()
     return bool(re.match(r'^\d+\.\d+\.?$', s))
 
-def _is_total_row(tr_val) -> bool:
-    """Jami: — yakuniy qator."""
-    if pd.isna(tr_val):
+_TOTAL_KEYWORDS = {'jami', 'ҳаммаси', 'hammasi', 'итого', 'барчаси', 'жами'}
+
+def _is_total_row(val) -> bool:
+    """
+    Jami / ҲАММАСИ / Итого — yakuniy qator.
+    MUHIM: 'jami' so'zi BUTUN SO'Z sifatida tekshiriladi —
+    'jamiyat', 'jamiyatning' kabi so'zlar noto'g'ri match qilmasin.
+    """
+    if val is None:
         return False
-    return 'jami' in str(tr_val).strip().lower()
+    try:
+        if pd.isna(val):
+            return False
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip().lower()
+    # Satrni so'zlarga bo'lib, har bir so'zni kalit so'zlar bilan taqqoslaymiz
+    words = re.split(r'[\s:/,()\-]+', s)
+    return any(w in _TOTAL_KEYWORDS for w in words if w)
 
 def _safe_int(val) -> int:
     """NaN yoki noto'g'ri qiymatni 0 ga aylantiradi."""
@@ -51,50 +139,6 @@ def _safe_int(val) -> int:
     except (TypeError, ValueError):
         return 0
 
-def _extract_meta(df, row_hint: int, prefix: str) -> str:
-    """
-    'Tinglovchilar kontingenti: Sport...' kabi qatordan qiymatni ajratadi.
-    Avval row_hint qatorida, topilmasa barcha qatorlarda qidiradi.
-    """
-    def _check_row(r_idx):
-        for col in range(df.shape[1]):
-            val = df.iloc[r_idx, col]
-            if pd.notna(val) and prefix.lower() in str(val).lower():
-                text = str(val).strip()
-                # Qiymat ikkinchi ustunda bo'lishi mumkin
-                next_col = col + 1
-                if ':' in text:
-                    right = text.split(':', 1)[1].strip()
-                    if right:
-                        return right
-                    # Bo'sh bo'lsa keyingi ustundan ol
-                    if next_col < df.shape[1]:
-                        nv = df.iloc[r_idx, next_col]
-                        if pd.notna(nv):
-                            return str(nv).strip()
-                else:
-                    # Keyingi ustun qiymatini qaytarish
-                    if next_col < df.shape[1]:
-                        nv = df.iloc[r_idx, next_col]
-                        if pd.notna(nv):
-                            return str(nv).strip()
-                    return text
-        return ''
-
-    # Avval ko'rsatilgan qatorda qidirish (±3 qator oraliq)
-    for offset in range(-3, 4):
-        r = row_hint + offset
-        if 0 <= r < df.shape[0]:
-            result = _check_row(r)
-            if result:
-                return result
-
-    # Topilmasa — barcha qatorlarni qidirish
-    for r in range(df.shape[0]):
-        result = _check_row(r)
-        if result:
-            return result
-    return ''
 
 
 def _find_data_start(df) -> int:
@@ -103,30 +147,74 @@ def _find_data_start(df) -> int:
     for i in range(df.shape[0]):
         if _is_block_row(df.iloc[i, 0]):
             return i
-        # Ba'zi fayllarda 0-ustun bo'sh, blok 1-ustunda
         if df.shape[1] > 1 and _is_block_row(df.iloc[i, 1]):
             return i
     return -1
 
-def _parse_study_form(text: str) -> str:
-    """O'qish shakli textdan StudyForm choicega."""
-    t = text.lower()
-    if 'sirtqi' in t or 'ajralmagan' in t:
-        return Curriculum.StudyForm.PARTTIME
-    if 'masofaviy' in t or 'online' in t or 'onlayn' in t:
-        return Curriculum.StudyForm.DISTANCE
-    return Curriculum.StudyForm.FULLTIME
 
-def _parse_duration(text: str) -> tuple[int, int]:
-    """'4 hafta (144 soat)' → (4, 144)."""
-    weeks = hours = 0
-    m = re.search(r'(\d+)\s*hafta', text)
-    if m:
-        weeks = int(m.group(1))
-    m = re.search(r'(\d+)\s*soat', text)
-    if m:
-        hours = int(m.group(1))
-    return weeks, hours
+def _detect_hour_cols(df, data_start: int, col_offset: int) -> dict:
+    """
+    Soat ustunlarining joylashuvini AVTOMATIK aniqlaydi.
+    Birinchi blok yoki fan qatorida B-ustundan keyin birinchi raqamli
+    qiymatning pozitsiyasiga qarab format aniqlanadi.
+
+    Format A — Kirill shablon (8._СФ_МО.xls):
+      C(2)=Ҳаммаси  D(3)=АудJами  E(4)=Назарий  F(5)=Амалий
+      G(6)=Кўчма    H(7)=Мустақил  I-L(8-11)=Haftalar
+
+    Format B — Lotin shablon (12-СТМ_...xlsx):
+      F(5)=Jami  G(6)=Nazariy  H(7)=Amaliy  I(8)=Ko'chma
+      J(9)=Mustaqil  K-N(10-13)=Haftalar
+
+    Qaytaradi: {'lecture', 'practice', 'field', 'independent',
+                'week1', 'week2', 'week3', 'week4'} — col_offset QOSHMASDAN indekslar.
+    """
+    jami_ci = 2  # Default: Format A
+
+    for i in range(data_start, min(data_start + 20, df.shape[0])):
+        tr_v = df.iloc[i, col_offset] if df.shape[1] > col_offset else None
+        if not (_is_block_row(tr_v) or _is_subject_row(tr_v)):
+            continue
+        row  = df.iloc[i]
+        ncols = len(row)
+        # B-ustundan (col_offset+1) keyin birinchi musbat raqamni topish
+        for ci in range(col_offset + 2, min(col_offset + 12, ncols)):
+            v = row.iloc[ci]
+            if pd.notna(v) and str(v).strip():
+                try:
+                    if float(v) > 0:
+                        jami_ci = ci - col_offset
+                        break
+                except (ValueError, TypeError):
+                    pass
+        break  # faqat birinchi mos qator tekshiriladi
+
+    if jami_ci <= 3:
+        total_cols = df.shape[1]
+        if total_cols <= 11:
+            # Format C: 14-Психологлар.xlsx — AudJami ustuni yo'q, 11 ta ustun
+            # A(0)=T/r  B(1)=Nom  C(2)=Jami  D(3)=Nazariy  E(4)=Amaliy
+            # F(5)=Ko'chma  G(6)=Mustaqil  H(7)=Hafta1  I(8)=Hafta2  J(9)=Hafta3  K(10)=Hafta4
+            return {
+                'lecture': 3, 'practice': 4, 'field': 5, 'independent': 6,
+                'week1': 7, 'week2': 8, 'week3': 9, 'week4': 10,
+            }
+        else:
+            # Format A: 8._СФ_МО.xls — AudJami ustuni bor, 12+ ustun
+            # C(2)=Jami  D(3)=AudJami  E(4)=Nazariy  F(5)=Amaliy
+            # G(6)=Ko'chma  H(7)=Mustaqil  I-L(8-11)=Haftalar
+            return {
+                'lecture': 4, 'practice': 5, 'field': 6, 'independent': 7,
+                'week1': 8, 'week2': 9, 'week3': 10, 'week4': 11,
+            }
+    else:
+        # Format B: 12-СТМ_...xlsx — Jami ancha o'ngda
+        b = jami_ci
+        return {
+            'lecture': b + 1, 'practice': b + 2, 'field': b + 3, 'independent': b + 4,
+            'week1':  b + 5,  'week2':  b + 6,  'week3':  b + 7,  'week4':  b + 8,
+        }
+
 
 def _generate_subject_code(name: str) -> str:
     """
@@ -185,8 +273,12 @@ def _get_or_create_subject(code: str, name: str, organization) -> tuple:
 def parse_curriculum_excel(file, major: Major, organization,
                            curriculum_name: str = '') -> dict:
     """
-    O'quv reja Excel faylini o'qib, Curriculum + Block + Subject larni
-    yaratadi yoki yangilaydi.
+    O'quv reja Excel faylini o'qib, Curriculum + Block + Subject larni yaratadi.
+
+    Shablon formati (oquv_reja_shablon.xlsx):
+      A(0)=T/r  B(1)=Fan nomi  C(2)=Jami  D(3)=Nazariy  E(4)=Amaliy
+      F(5)=Ko'chma  G(6)=Mustaqil  H(7)=I-hafta  I(8)=II-hafta
+      J(9)=III-hafta  K(10)=IV-hafta
 
     Qaytaradi:
         { 'curriculum': Curriculum, 'blocks': int, 'subjects': int,
@@ -195,27 +287,19 @@ def parse_curriculum_excel(file, major: Major, organization,
     warnings = []
     df = pd.read_excel(file, sheet_name=0, header=None)
 
-    # ── METADATA ──────────────────────────────────────────────────────────────
-    # User kiritgan nom ustuvorlik — agar bo'sh bo'lsa Exceldan olamiz
-    if curriculum_name:
-        # Foydalanuvchi kiritgan nom — Excelga ustuvorlik
-        course_name = curriculum_name
-    else:
-        # Exceldan aniq "Kurs nomi:" ni qidirish
-        course_name = (
-            _extract_meta(df, 13, 'kurs nomi') or  # "Kurs nomi: ..." aniq prefix
-            _extract_meta(df, 13, 'kurs')           # keng fallback
-        )
-        # Hali ham topilmasa — yo'nalish nomidan yasaymiz
-        if not course_name:
-            course_name = f"{major.name} O'quv reja"
+    # ── SHABLON VALIDATSIYA ───────────────────────────────────────────────────
+    valid, err_msg = _validate_template(df)
+    if not valid:
+        return {
+            'curriculum': None,
+            'blocks': 0, 'subjects': 0,
+            'warnings': [err_msg],
+            'error': err_msg,
+        }
 
-    contingent   = _extract_meta(df, 14, 'kontingenti')
-    duration_txt = _extract_meta(df, 15, 'muddati')
-    form_txt     = _extract_meta(df, 16, 'shakli')
-
-    duration_weeks, total_hours = _parse_duration(duration_txt)
-    study_form = _parse_study_form(form_txt)
+    # ── NOMI ─────────────────────────────────────────────────────────────────
+    # Foydalanuvchi kiritgan nom → aks holda yo'nalish nomi
+    course_name = curriculum_name or f"{major.name} O'quv reja"
 
     # ── DATA QATORLAR BOSHLANISH NUQTASI ──────────────────────────────────────
     data_start = _find_data_start(df)
@@ -237,10 +321,6 @@ def parse_curriculum_excel(file, major: Major, organization,
         curriculum = Curriculum.objects.create(
             major=major,
             name=course_name,
-            contingent=contingent,
-            study_form=study_form,
-            duration_weeks=duration_weeks or 4,
-            total_hours=total_hours or 144,
             status=Curriculum.Status.ACTIVE,
         )
 
@@ -257,6 +337,9 @@ def parse_curriculum_excel(file, major: Major, organization,
         if df.shape[1] > 1 and _is_block_row(df.iloc[data_start, 1]):
             col_offset = 1
 
+        # Ustunlar tartibini avtomatik aniqlash (Format A vs Format B)
+        hcols = _detect_hour_cols(df, data_start, col_offset)
+
         for row_idx in range(data_start, df.shape[0]):
             row      = df.iloc[row_idx]
             ncols    = len(row)
@@ -264,18 +347,34 @@ def parse_curriculum_excel(file, major: Major, organization,
             name_col = col_offset + 1
             name_val = str(row.iloc[name_col]).strip() if ncols > name_col and pd.notna(row.iloc[name_col]) else ''
 
-            # ── JAMI qatori — to'xtatish ──────────────────────────────────────
-            if _is_total_row(tr_val):
+            # ── JAMI qatori — to'xtatish ─────────────────────────────────────
+            if _is_total_row(tr_val) or _is_total_row(name_val):
                 break
             # Bo'sh qator — o'tkazib yuborish
             if tr_val is None or (pd.isna(tr_val) and not name_val):
                 continue
 
-            # ── BLOK qatori ───────────────────────────────────────────────────
+            # Soat ustunlarini xavfsiz olish (blok va fan qatorlari uchun umumiy)
+            def _gc(ci):
+                idx = ci + col_offset
+                return row.iloc[idx] if ncols > idx else None
+
+            def _read_hours():
+                return (
+                    _safe_int(_gc(hcols['lecture'])),
+                    _safe_int(_gc(hcols['practice'])),
+                    _safe_int(_gc(hcols['field'])),
+                    _safe_int(_gc(hcols['independent'])),
+                    _safe_int(_gc(hcols['week1'])),
+                    _safe_int(_gc(hcols['week2'])),
+                    _safe_int(_gc(hcols['week3'])),
+                    _safe_int(_gc(hcols['week4'])),
+                )
+
+            # ── BLOK qatori ──────────────────────────────────────────────────
             if _is_block_row(tr_val):
                 block_order += 1
                 subject_order = 0
-                # Blok nomi: name_val dan olinadi (bo'lsa)
                 block_name = name_val if name_val else f'Blok {block_order}'
                 current_block = CurriculumBlock.objects.create(
                     curriculum=curriculum,
@@ -285,43 +384,26 @@ def parse_curriculum_excel(file, major: Major, organization,
                 blocks_count += 1
                 continue
 
-            # ── FAN qatori ────────────────────────────────────────────────────
+            # ── FAN qatori ───────────────────────────────────────────────────
             if _is_subject_row(tr_val) and current_block and name_val:
                 subject_order += 1
                 code = str(tr_val).strip().rstrip('.')
+                lh, ph, fh, ih, w1, w2, w3, w4 = _read_hours()
 
-                # Col indekslari (col_offset hisobga olingan):
-                # 0=T/r, 1=Fan nomi, 2=Jami, 3=Nazariy(ma'ruza), 4=Amaliy,
-                # 5=Ko'chma, 6=Mustaqil, 7=I-hafta, 8=II-h, 9=III-h, 10=IV-h
-                # Asosiy format (col_offset=0): 6=Leksiya, 7=Amaliy, 8=Ko'chma
-                def _gc(ci):
-                    """col_offset qo'shib xavfsiz olish."""
-                    idx = ci + col_offset
-                    return row.iloc[idx] if ncols > idx else None
-
-                lecture_h     = _safe_int(_gc(6))
-                practice_h    = _safe_int(_gc(7))
-                field_h       = _safe_int(_gc(8))
-                independent_h = _safe_int(_gc(9))
-                week1_h       = _safe_int(_gc(10))
-                week2_h       = _safe_int(_gc(11))
-                week3_h       = _safe_int(_gc(12))
-                week4_h       = _safe_int(_gc(13))
-
-                subject, created = _get_or_create_subject(code, name_val, organization)
+                subj, created = _get_or_create_subject(code, name_val, organization)
 
                 CurriculumSubject.objects.create(
                     block=current_block,
-                    subject=subject,
+                    subject=subj,
                     order=subject_order,
-                    lecture_hours=lecture_h,
-                    practice_hours=practice_h,
-                    field_hours=field_h,
-                    independent_hours=independent_h,
-                    week1_hours=week1_h,
-                    week2_hours=week2_h,
-                    week3_hours=week3_h,
-                    week4_hours=week4_h,
+                    lecture_hours=lh,
+                    practice_hours=ph,
+                    field_hours=fh,
+                    independent_hours=ih,
+                    week1_hours=w1,
+                    week2_hours=w2,
+                    week3_hours=w3,
+                    week4_hours=w4,
                 )
                 subjects_count += 1
                 if created:
@@ -341,7 +423,7 @@ def parse_curriculum_excel(file, major: Major, organization,
 
 class MajorViewSet(viewsets.ModelViewSet):
     serializer_class = MajorSerializer
-    permission_classes = [IsEduAdmin]
+    permission_classes = [IsEduAdminOrMethodist]
 
     def get_queryset(self):
         return Major.objects.filter(
@@ -354,7 +436,9 @@ class MajorViewSet(viewsets.ModelViewSet):
 
 class SubjectViewSet(viewsets.ModelViewSet):
     serializer_class = SubjectSerializer
-    permission_classes = [IsEduAdmin]
+    # O'qish har qanday autentifikatsiyalangan foydalanuvchiga ochiq (dropdown/preview
+    # uchun, masalan dept_manager). Yozish faqat edu_admin+ da qoladi.
+    permission_classes = [IsEduAdminOrReadOnly]
 
     def get_queryset(self):
         return Subject.objects.filter(
@@ -399,7 +483,7 @@ class SubjectViewSet(viewsets.ModelViewSet):
 
 class CurriculumViewSet(viewsets.ModelViewSet):
     serializer_class   = CurriculumSerializer
-    permission_classes = [IsEduAdmin]
+    permission_classes = [IsEduAdminOrMethodist]
     parser_classes     = [MultiPartParser, FormParser]
 
     def get_queryset(self):
@@ -507,105 +591,26 @@ class CurriculumViewSet(viewsets.ModelViewSet):
     def template(self, request):
         """
         GET /api/v1/curriculums/template/
-        O'quv reja Excel shablonini yuklab beradi.
+        O'quv reja rasmiy shablon faylini yuklab beradi.
+        Shablon: 14-Психологлар.xlsx formati (11 ustun)
         """
-        import io
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from django.http import HttpResponse
+        import os
+        from django.http import HttpResponse, Http404
 
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "O'quv reja"
+        fixture_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'fixtures',
+            'oquv_reja_shablon.xlsx',
+        )
 
-        blue_fill   = PatternFill('solid', fgColor='1F4E79')
-        gray_fill   = PatternFill('solid', fgColor='D9D9D9')
-        block_fill  = PatternFill('solid', fgColor='BDD7EE')
-        white_font  = Font(bold=True, color='FFFFFF', size=10)
-        black_bold  = Font(bold=True, size=10)
-        center      = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        left        = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-        thin        = Side(style='thin', color='AAAAAA')
-        border      = Border(left=thin, right=thin, top=thin, bottom=thin)
+        if not os.path.exists(fixture_path):
+            raise Http404("Shablon fayl topilmadi. Administrator bilan bog'laning.")
 
-        def cell(r, c, val='', fill=None, font=None, align=None, bold=False):
-            cl = ws.cell(row=r, column=c, value=val)
-            if fill:  cl.fill      = fill
-            if font:  cl.font      = font
-            elif bold: cl.font     = Font(bold=True, size=10)
-            if align: cl.alignment = align
-            cl.border = border
-            return cl
-
-        # ── METADATA qatorlar (1-16) ──────────────────────────────────────────
-        meta_rows = [
-            (1,  "SPORT TA'LIM MUASSASASI"),
-            (2,  ""),
-            (10, "Kurs nomi:"),
-            (11, "Yo'nalish:"),
-            (12, "Tinglovchilar kontingenti: Sport...",),
-            (13, "Kurs nomi: Jismoniy tarbiya va sport mutaxassisligiga kirish"),
-            (14, "Tinglovchilar kontingenti: Sport mutaxassisligi"),
-            (15, "O'qish muddati: 4 hafta (144 soat)"),
-            (16, "O'qish shakli: Kunduzgi"),
-        ]
-        for r, txt in meta_rows:
-            ws.cell(row=r, column=1, value=txt).font = Font(bold=True, size=10)
-
-        ws.merge_cells('A1:N1')
-        ws.cell(row=1, column=1).alignment = center
-
-        # ── JADVAL SARLAVHASI (17-qator) ─────────────────────────────────────
-        headers = [
-            'T/r', 'Fan nomi / Modul', 'Jami soat',
-            "Ma'ruza (Nazariy)", 'Amaliy', "Ko'chma", 'Mustaqil',
-            'I-hafta', 'II-hafta', 'III-hafta', 'IV-hafta',
-            'Izoh',
-        ]
-        for c, h in enumerate(headers, start=1):
-            cell(17, c, h, fill=blue_fill, font=white_font, align=center)
-
-        ws.row_dimensions[17].height = 45
-
-        # ── MISOL MA'LUMOTLAR ─────────────────────────────────────────────────
-        example_data = [
-            # (T/r, Fan nomi, Jami, Leksiya, Amaliy, Ko'chma, Mustaqil, w1, w2, w3, w4, Izoh)
-            ('I.',   'JISMONIY TAYYORGARLIK BLOKI',  '',  '', '', '', '', '', '', '', '', ''),
-            ('1.1.', 'Jismoniy tayyorgarlik',          40, 16,  8,  8,  8, 10, 10, 10, 10, ''),
-            ('1.2.', 'Sport mashg\'uloti',              40,  8, 16,  8,  8, 10, 10, 10, 10, ''),
-            ('1.3.', 'Maxsus jismoniy tayyorgarlik',   24,  8,  8,  4,  4,  6,  6,  6,  6, ''),
-            ('II.',  'NAZARIY BILIMLAR BLOKI',          '',  '', '', '', '', '', '', '', '', ''),
-            ('2.1.', 'Nazariya va metodika',            16, 12,  4,  0,  0,  4,  4,  4,  4, ''),
-            ('2.2.', 'Taktika',                         16,  8,  8,  0,  0,  4,  4,  4,  4, ''),
-            ('III.', 'AMALIY KO\'NIKMALAR BLOKI',       '',  '', '', '', '', '', '', '', '', ''),
-            ('3.1.', 'Pedagogik amaliyot',               8,  0,  8,  0,  0,  2,  2,  2,  2, ''),
-            ('Jami:', '',                               144, 52, 52, 20, 20, 36, 36, 36, 36, ''),
-        ]
-
-        for r_offset, row_data in enumerate(example_data):
-            r = 18 + r_offset
-            tr = row_data[0]
-            is_block = _is_block_row(tr)
-            is_total = _is_total_row(tr)
-            bg = block_fill if is_block else (gray_fill if is_total else None)
-            fn = black_bold if (is_block or is_total) else Font(size=10)
-            for c, val in enumerate(row_data, start=1):
-                cl = cell(r, c, val if val != '' else None, fill=bg, font=fn,
-                          align=center if c != 2 else left)
-
-        # ── USTUN KENGLIKLARI ─────────────────────────────────────────────────
-        col_widths = [6, 35, 8, 14, 8, 8, 9, 8, 8, 8, 8, 15]
-        for i, w in enumerate(col_widths, start=1):
-            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-
-        ws.freeze_panes = 'A18'
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
+        with open(fixture_path, 'rb') as f:
+            data = f.read()
 
         resp = HttpResponse(
-            buf.read(),
+            data,
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
         resp['Content-Disposition'] = 'attachment; filename="oquv_reja_shablon.xlsx"'
@@ -614,7 +619,7 @@ class CurriculumViewSet(viewsets.ModelViewSet):
 
 class CurriculumBlockViewSet(viewsets.ModelViewSet):
     serializer_class = CurriculumBlockSerializer
-    permission_classes = [IsEduAdmin]
+    permission_classes = [IsEduAdminOrMethodist]
 
     def get_queryset(self):
         qs = CurriculumBlock.objects.filter(
@@ -629,7 +634,7 @@ class CurriculumBlockViewSet(viewsets.ModelViewSet):
 
 class CurriculumSubjectViewSet(viewsets.ModelViewSet):
     serializer_class = CurriculumSubjectSerializer
-    permission_classes = [IsEduAdmin]
+    permission_classes = [IsEduAdminOrMethodist]
 
     def get_queryset(self):
         qs = CurriculumSubject.objects.filter(
@@ -704,7 +709,7 @@ class CurriculumSubjectViewSet(viewsets.ModelViewSet):
 
 class GroupViewSet(viewsets.ModelViewSet):
     serializer_class = GroupSerializer
-    permission_classes = [IsEduAdmin]
+    permission_classes = [IsEduAdminWriteMethodistRead]
 
     def get_queryset(self):
         return Group.objects.filter(
@@ -718,7 +723,9 @@ class GroupViewSet(viewsets.ModelViewSet):
 
 class ShiftViewSet(viewsets.ModelViewSet):
     serializer_class = ShiftSerializer
-    permission_classes = [IsOrgAdmin]
+    # Ilgari IsOrgAdmin edi — edu_admin frontendda /shifts ga kira olsa ham
+    # backend 403 qaytarardi (haqiqiy bug). Endi edu_admin+ yozadi, methodist o'qiydi.
+    permission_classes = [IsEduAdminWriteMethodistRead]
 
     def get_queryset(self):
         return Shift.objects.filter(
@@ -732,7 +739,8 @@ class ShiftViewSet(viewsets.ModelViewSet):
 
 class ParaViewSet(viewsets.ModelViewSet):
     serializer_class = ParaSerializer
-    permission_classes = [IsOrgAdmin]
+    # Ilgari IsOrgAdmin edi — Shift bilan bir xil bug (edu_admin 403 olardi). Tuzatildi.
+    permission_classes = [IsEduAdminWriteMethodistRead]
 
     def get_queryset(self):
         return Para.objects.filter(
@@ -743,9 +751,102 @@ class ParaViewSet(viewsets.ModelViewSet):
 
 class GroupAssignmentViewSet(viewsets.ModelViewSet):
     serializer_class = GroupAssignmentSerializer
-    permission_classes = [IsEduAdmin]
+    permission_classes = [IsEduAdminWriteMethodistRead]
 
     def get_queryset(self):
         return GroupAssignment.objects.filter(
             group__organization=self.request.user.organization
         ).select_related('group', 'shift', 'building')
+
+
+class GroupDayAssignmentViewSet(viewsets.ModelViewSet):
+    """
+    Guruh kunlik biriktiruvi — har bir sana uchun smena + xona.
+
+    GET  /group-day-assignments/?group=1&year=2026&month=6
+    POST /group-day-assignments/bulk-save/
+    POST /group-day-assignments/bulk-delete/
+    """
+    serializer_class   = GroupDayAssignmentSerializer
+    permission_classes = [IsEduAdminWriteMethodistRead]
+    pagination_class   = None  # Oylik barcha kunlarni bir so'rovda qaytarish uchun
+
+    def get_queryset(self):
+        qs = GroupDayAssignment.objects.filter(
+            group__organization=self.request.user.organization
+        ).select_related('group', 'shift', 'building')
+
+        group_id = self.request.query_params.get('group')
+        year     = self.request.query_params.get('year')
+        month    = self.request.query_params.get('month')
+
+        if group_id:
+            qs = qs.filter(group_id=group_id)
+        if year and month:
+            qs = qs.filter(date__year=year, date__month=month)
+        elif year:
+            qs = qs.filter(date__year=year)
+
+        return qs
+
+    @action(detail=False, methods=['post'], url_path='bulk-save')
+    def bulk_save(self, request):
+        """
+        {
+          "group": 1,
+          "shift": 2,
+          "room": 3,
+          "dates": ["2026-06-03", "2026-06-10", ...]
+        }
+        """
+        group_id = request.data.get('group')
+        shift_id    = request.data.get('shift')
+        building_id = request.data.get('building')
+        dates       = request.data.get('dates', [])
+
+        if not group_id or not dates:
+            return Response(
+                {'error': '"group" va "dates" maydonlari talab qilinadi.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        group = Group.objects.filter(
+            id=group_id,
+            organization=request.user.organization,
+        ).first()
+        if not group:
+            return Response({'error': 'Guruh topilmadi.'}, status=status.HTTP_404_NOT_FOUND)
+
+        created_count = updated_count = 0
+        for date_str in dates:
+            _, created = GroupDayAssignment.objects.update_or_create(
+                group=group,
+                date=date_str,
+                defaults={'shift_id': shift_id, 'building_id': building_id},
+            )
+            if created:
+                created_count += 1
+            else:
+                updated_count += 1
+
+        return Response({
+            'created': created_count,
+            'updated': updated_count,
+            'total':   len(dates),
+        })
+
+    @action(detail=False, methods=['post'], url_path='bulk-delete')
+    def bulk_delete(self, request):
+        """
+        { "group": 1, "dates": ["2026-06-03"] }
+        """
+        group_id = request.data.get('group')
+        dates    = request.data.get('dates', [])
+
+        deleted, _ = GroupDayAssignment.objects.filter(
+            group__organization=request.user.organization,
+            group_id=group_id,
+            date__in=dates,
+        ).delete()
+
+        return Response({'deleted': deleted})

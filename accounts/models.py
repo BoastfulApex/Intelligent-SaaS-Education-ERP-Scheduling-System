@@ -7,6 +7,7 @@ class User(AbstractUser):
         SUPER_ADMIN        = 'super_admin',  'System Super Admin'
         ORG_ADMIN          = 'org_admin',    'Organization Admin'
         EDU_ADMIN          = 'edu_admin',    "O'quv Bo'limi Admini"
+        METHODIST          = 'methodist',    "O'quv jarayonini metodik ta'minlash bo'limi"
         DEPARTMENT_MANAGER = 'dept_manager', 'Kafedra Mudiri'
         TEACHER            = 'teacher',      "O'qituvchi"
 

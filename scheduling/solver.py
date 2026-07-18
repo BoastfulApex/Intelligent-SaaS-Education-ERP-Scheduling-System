@@ -43,6 +43,7 @@ class Task:
     hours:      int          # bajariladigan umumiy soat
     paras_needed: int        # hours // 2
     building_id:  int        # guruh biriktirilgan bino
+    requires_computer_room: bool = False   # Subject.requires_computer_room (IT/AKT fani)
 
     # Haftalik taqsimot (0 = cheklov yo'q)
     week_hours: list = field(default_factory=lambda: [0, 0, 0, 0])
@@ -126,7 +127,8 @@ def _lesson_type_for_subject(cs: CurriculumSubject | None) -> str:
 def _select_room(building_id: int,
                  lesson_type: str,
                  min_capacity: int,
-                 used_room_ids: set[int]) -> Room | None:
+                 used_room_ids: set[int],
+                 requires_computer_room: bool = False) -> Room | None:
     """Bo'sh, mos xona topish."""
     qs = Room.objects.filter(
         building_id=building_id,
@@ -134,12 +136,23 @@ def _select_room(building_id: int,
         capacity__gte=min_capacity,
     ).exclude(id__in=used_room_ids)
 
-    if lesson_type in ('lecture',):
-        qs = qs.filter(room_type__in=['lecture', 'seminar'])
-    elif lesson_type in ('practice', 'field'):
-        qs = qs.filter(room_type__in=['lab', 'seminar'])
+    def _by_lesson_type(base_qs):
+        if lesson_type in ('lecture',):
+            return base_qs.filter(room_type__in=['lecture', 'seminar'])
+        if lesson_type in ('practice', 'field'):
+            return base_qs.filter(room_type__in=['lab', 'seminar'])
+        return base_qs
 
-    return qs.first()
+    if requires_computer_room:
+        # IT/AKT fani — avval 'Kompyuter xonasi' turidagi xona izlanadi. Binoda bunday
+        # xona bo'lmasa/band bo'lsa — dars xonasiz qolib ketmasligi uchun oddiy
+        # (dars turiga mos) xonaga tushiladi (fallback).
+        room = qs.filter(room_type='computer').first()
+        if room:
+            return room
+        return _by_lesson_type(qs).first()
+
+    return _by_lesson_type(qs).first()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -245,6 +258,7 @@ def generate_schedule(
 
         cs = dist.curriculum_subject
         lesson_type = _lesson_type_for_subject(cs)
+        requires_computer_room = bool(cs and cs.subject and cs.subject.requires_computer_room)
 
         week_hours = [0, 0, 0, 0]
         if cs:
@@ -264,6 +278,7 @@ def generate_schedule(
             hours=hours,
             paras_needed=hours // 2,
             building_id=ga.building_id,
+            requires_computer_room=requires_computer_room,
             week_hours=week_hours,
         ))
 
@@ -374,6 +389,8 @@ def generate_schedule(
     # ── 9. NATIJALARNI ScheduleEntry GA AYLANTIRISH ───────────────────────────
     # Xona band qilish (date, para_id) → {used room ids}
     used_rooms: defaultdict[tuple, set] = defaultdict(set)
+    # Kompyuter xonasi topilmay, fallback xonaga tushgan fanlar (bir marta ogohlantirish uchun)
+    no_computer_room_subjects: set[int] = set()
 
     entries: list[ScheduleEntry] = []
     total_placed = 0
@@ -395,9 +412,18 @@ def generate_schedule(
             lesson_type=task.room_type,
             min_capacity=capacity,
             used_room_ids=used_rooms[(slot.date, slot.para_id)],
+            requires_computer_room=task.requires_computer_room,
         )
         if room:
             used_rooms[(slot.date, slot.para_id)].add(room.id)
+            if (task.requires_computer_room and room.room_type != 'computer'
+                    and task.subject_id not in no_computer_room_subjects):
+                no_computer_room_subjects.add(task.subject_id)
+                warnings.append(
+                    f"Fan #{task.subject_id} kompyuter xonasini talab qiladi, lekin "
+                    f"bino #{task.building_id}da bo'sh kompyuter xonasi topilmadi — "
+                    "boshqa xonaga joylashtirildi."
+                )
 
         entries.append(ScheduleEntry(
             schedule=schedule,

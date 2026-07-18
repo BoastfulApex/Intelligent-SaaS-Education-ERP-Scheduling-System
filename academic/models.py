@@ -32,12 +32,19 @@ class Subject(models.Model):
     )
     name = models.CharField(max_length=255, verbose_name="Fan nomi")
     code = models.CharField(max_length=50, verbose_name="Fan kodi")
+    requires_computer_room = models.BooleanField(
+        default=False,
+        verbose_name="Kompyuter xonasida o'tilishi shart",
+        help_text="Belgilansa, jadval generatsiyasida bu fan uchun faqat "
+                   "'Kompyuter xonasi' turidagi xona tanlanadi (IT/AKT fanlari uchun)"
+    )
 
     class Meta:
         db_table = 'subjects'
         verbose_name = "Fan"
         verbose_name_plural = "Fanlar"
         unique_together = ['organization', 'code']
+        ordering = ['name']
 
     def __str__(self):
         return f"{self.name} ({self.code})"
@@ -324,3 +331,29 @@ class GroupAssignment(models.Model):
 
     def __str__(self):
         return f"{self.group} | {self.shift} | {self.building} | {self.month}/{self.year}"
+
+
+class GroupDayAssignment(models.Model):
+    """
+    Guruhga kunlik smena va lokatsiya biriktirilishi.
+    Har bir sana uchun alohida yozuv — kalendar asosida kiritiladi.
+    """
+    group = models.ForeignKey(Group, on_delete=models.CASCADE,
+                              related_name='day_assignments', verbose_name="Guruh")
+    date  = models.DateField(verbose_name="Sana")
+    shift = models.ForeignKey(Shift, on_delete=models.SET_NULL,
+                              null=True, blank=True,
+                              related_name='day_assignments', verbose_name="Smena")
+    building = models.ForeignKey('organizations.Building', on_delete=models.SET_NULL,
+                                null=True, blank=True,
+                                related_name='day_assignments', verbose_name="Bino")
+
+    class Meta:
+        db_table = 'group_day_assignments'
+        verbose_name = "Guruh kunlik biriktiruvi"
+        verbose_name_plural = "Guruh kunlik biriktiruvilari"
+        unique_together = ['group', 'date']
+        ordering = ['date']
+
+    def __str__(self):
+        return f"{self.group} | {self.date} | {self.shift} | {self.building}"

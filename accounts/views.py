@@ -7,7 +7,7 @@ from .models import User
 from .serializers import UserSerializer, UserCreateSerializer, ChangePasswordSerializer
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
-from permissions import IsOrgAdmin
+from permissions import IsOrgAdmin, IsDeptManager
 import pandas as pd
 import re
 
@@ -17,6 +17,16 @@ class UserViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['role', 'is_active']
     search_fields = ['username', 'first_name', 'last_name', 'email']
+
+    def get_permissions(self):
+        # O'qish (ro'yxat/detal) dept_manager+ ga ochiq — masalan o'qituvchi
+        # biriktirish sahifasidagi foydalanuvchi dropdown'i uchun.
+        # Yozish (yaratish/tahrirlash/o'chirish) faqat org_admin da qoladi.
+        if self.action in ('list', 'retrieve'):
+            return [IsDeptManager()]
+        if self.action in ('me', 'change_password'):
+            return [IsAuthenticated()]
+        return [IsOrgAdmin()]
 
     def get_serializer_class(self):
         if self.action == 'create':

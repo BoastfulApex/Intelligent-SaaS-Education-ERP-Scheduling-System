@@ -2,8 +2,9 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import transaction
+from django.db.models import Q, Count
 from django.http import HttpResponse
 import datetime
 import io
@@ -15,7 +16,8 @@ from permissions import IsDeptManager, IsEduAdmin, IsOrgAdmin, IsDeptManagerOrRe
 from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
                      Substitution, AuditLog,
-                     LoadSheet, TeacherLoad, LoadDistribution)
+                     LoadSheet, TeacherLoad, LoadDistribution,
+                     SubjectTeacher)
 from .serializers import (TeacherSerializer, TeacherBusyTimeSerializer,
                            TeacherSubjectAssignmentSerializer,
                            TeacherMonthlyLoadSerializer, ScheduleSerializer,
@@ -254,10 +256,24 @@ class TeacherViewSet(viewsets.ModelViewSet):
     permission_classes = [IsDeptManager]
 
     def get_queryset(self):
-        return Teacher.objects.filter(
+        qs = Teacher.objects.filter(
             organization=self.request.user.organization,
             is_active=True
-        ).select_related('user', 'personal_room')
+        ).select_related('user', 'personal_room', 'department').annotate(
+            # Fan biriktirish (TeacherSubjectAssignment) bo'yicha sanoqlar
+            assigned_major_count=Count('subject_assignments', distinct=True),
+            assigned_subject_count=Count('subject_assignments__subjects', distinct=True),
+        )
+
+        user = self.request.user
+        if user.role == 'dept_manager':
+            dept = Department.objects.filter(
+                manager=user, organization=user.organization
+            ).first()
+            if dept:
+                qs = qs.filter(department=dept)
+
+        return qs
 
 
 class TeacherBusyTimeViewSet(viewsets.ModelViewSet):
@@ -290,9 +306,7 @@ class TeacherBusyTimeViewSet(viewsets.ModelViewSet):
                 manager=user, organization=user.organization
             ).first()
             if dept:
-                qs = qs.filter(
-                    teacher__user__department=dept
-                )
+                qs = qs.filter(teacher__department=dept)
 
         # Query param filtrlari
         params = self.request.query_params
@@ -423,6 +437,15 @@ class TeacherSubjectAssignmentViewSet(viewsets.ModelViewSet):
         qs = TeacherSubjectAssignment.objects.filter(
             teacher__organization=self.request.user.organization
         ).select_related('teacher__user', 'major').prefetch_related('subjects')
+
+        user = self.request.user
+        if user.role == 'dept_manager':
+            dept = Department.objects.filter(
+                manager=user, organization=user.organization
+            ).first()
+            if dept:
+                qs = qs.filter(teacher__department=dept)
+
         major_id = self.request.query_params.get('major_id')
         if major_id:
             qs = qs.filter(major_id=major_id)
@@ -460,13 +483,23 @@ class TeacherSubjectAssignmentViewSet(viewsets.ModelViewSet):
         if not major:
             return Response({'error': 'Yo\'nalish topilmadi'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Dept manager faqat o'z kafedrasi o'qituvchilariga biriktira oladi
+        dept = None
+        if request.user.role == 'dept_manager':
+            dept = Department.objects.filter(
+                manager=request.user, organization=org
+            ).first()
+
         results = []
         with transaction.atomic():
             for item in assignments:
                 teacher_id  = item.get('teacher_id')
                 subject_ids = item.get('subject_ids', [])
 
-                teacher = Teacher.objects.filter(id=teacher_id, organization=org).first()
+                teacher_qs = Teacher.objects.filter(id=teacher_id, organization=org)
+                if dept:
+                    teacher_qs = teacher_qs.filter(department=dept)
+                teacher = teacher_qs.first()
                 if not teacher:
                     continue
 
@@ -501,6 +534,71 @@ class TeacherSubjectAssignmentViewSet(viewsets.ModelViewSet):
             'message': f'{len(results)} ta o\'qituvchi uchun fan biriktiruvi yangilandi.',
             'results': results,
         }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='majors-subjects',
+            permission_classes=[IsAuthenticated])
+    def majors_subjects(self, request):
+        """
+        GET /api/v1/teacher-subject-assignments/majors-subjects/?teacher_id=X
+
+        Yo'nalishlar (Major) va faol o'quv rejasidagi fanlari.
+        teacher_id berilsa — faqat o'qituvchining KAFEDRASIGA tegishli fanlar
+        (CurriculumSubject.department == teacher.department) qaytariladi va
+        faqat shunday fani bor yo'nalishlar ko'rsatiladi. O'qituvchida kafedra
+        belgilanmagan bo'lsa fan qaytmaydi.
+
+        Javob: {"teacher_has_department": bool, "majors": [{major_id, major_name, subjects: [...]}]}
+        """
+        from academic.models import Major, Curriculum
+
+        org = request.user.organization
+
+        teacher_id = request.query_params.get('teacher_id')
+        dept_id = None
+        if teacher_id:
+            teacher = Teacher.objects.filter(
+                id=teacher_id, organization=org
+            ).first()
+            if not teacher or not teacher.department_id:
+                # Kafedra belgilanmagan — fan yo'q
+                return Response({'teacher_has_department': False, 'majors': []})
+            dept_id = teacher.department_id
+
+        majors = Major.objects.filter(organization=org, is_active=True).order_by('name')
+
+        result = []
+        for major in majors:
+            curriculum = Curriculum.objects.filter(
+                major=major, status='active'
+            ).prefetch_related('blocks__subjects__subject').first()
+
+            subjects = []
+            seen_ids = set()
+            if curriculum:
+                for block in curriculum.blocks.all():
+                    for cs in block.subjects.all():
+                        # Kafedra bo'yicha filtr (teacher_id berilgan bo'lsa)
+                        if dept_id is not None and cs.department_id != dept_id:
+                            continue
+                        if cs.subject_id in seen_ids:
+                            continue
+                        seen_ids.add(cs.subject_id)
+                        subjects.append({
+                            'id':   cs.subject.id,
+                            'name': cs.subject.name,
+                        })
+
+            # teacher_id berilganda — faqat fani bor yo'nalishlarni ko'rsatamiz
+            if dept_id is not None and not subjects:
+                continue
+
+            result.append({
+                'major_id':   major.id,
+                'major_name': major.name,
+                'subjects':   subjects,
+            })
+
+        return Response({'teacher_has_department': True, 'majors': result})
 
 
 class TeacherMonthlyLoadViewSet(viewsets.ModelViewSet):
@@ -741,13 +839,53 @@ class SubstitutionViewSet(viewsets.ModelViewSet):
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Audit loglari (faqat o'qish).
+
+    Filtrlar (query params):
+      ?action=create|update|delete|...
+      ?model_name=Curriculum
+      ?user_id=3
+      ?date_from=YYYY-MM-DD
+      ?date_to=YYYY-MM-DD
+      ?search=... (object_repr / model_name ichidan qidiradi)
+    """
     serializer_class = AuditLogSerializer
     permission_classes = [IsOrgAdmin]
 
     def get_queryset(self):
-        return AuditLog.objects.filter(
+        qs = AuditLog.objects.filter(
             organization=self.request.user.organization
+        ).select_related('user')
+
+        params = self.request.query_params
+        if action := params.get('action'):
+            qs = qs.filter(action=action)
+        if model_name := params.get('model_name'):
+            qs = qs.filter(model_name=model_name)
+        if user_id := params.get('user_id'):
+            qs = qs.filter(user_id=user_id)
+        if date_from := params.get('date_from'):
+            qs = qs.filter(timestamp__date__gte=date_from)
+        if date_to := params.get('date_to'):
+            qs = qs.filter(timestamp__date__lte=date_to)
+        if search := params.get('search'):
+            qs = qs.filter(
+                Q(object_repr__icontains=search) |
+                Q(model_name__icontains=search)
+            )
+        return qs.order_by('-timestamp')
+
+    @action(detail=False, methods=['get'], url_path='model-names')
+    def model_names(self, request):
+        """Filtr dropdown'i uchun — shu tashkilotda logga tushgan model nomlari."""
+        names = (
+            AuditLog.objects
+            .filter(organization=request.user.organization)
+            .values_list('model_name', flat=True)
+            .distinct()
         )
+        return Response(sorted(set(names)))
 
 
 # ─────────────────────────────────────────────
@@ -759,10 +897,12 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
     Taqsimot varaqlari ro'yxati, ko'rish va o'chirish.
     Yuklash uchun: POST /load-sheets/upload/
     """
-    http_method_names = ['get', 'delete', 'head', 'options']  # PUT/PATCH yo'q
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']  # PUT/PATCH yo'q
     serializer_class   = LoadSheetSerializer
     permission_classes = [IsDeptManager]
-    parser_classes     = [MultiPartParser, FormParser]
+    # MultiPartParser/FormParser — 'upload' (Excel fayl) uchun;
+    # JSONParser — 'set-subject-teacher' (JSON body) uchun
+    parser_classes     = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         user = self.request.user
@@ -859,47 +999,88 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
     def curriculum_preview(self, request):
         """
         GET /api/v1/load-sheets/curriculum-preview/?month=M&year=YYYY
-        O'sha oydagi guruhlarning o'quv rejasidagi fanlar va soatlarini qaytaradi.
+
+        O'sha oydagi guruhlarning o'quv rejasidagi fanlarni qaytaradi.
+        - Guruhlar: GroupDayAssignment (kunlik kalendar) dan olinadi
+        - dept_manager: faqat o'z kafedrasi ga biriktirilgan fanlar
+        - Boshqa rollar: barcha fanlar
         """
-        from academic.models import GroupAssignment, Curriculum
+        from academic.models import GroupDayAssignment, Curriculum
 
         month = request.query_params.get('month')
         year  = request.query_params.get('year')
 
         if not month or not year:
             return Response({'error': 'month va year talab qilinadi'}, status=400)
-
         try:
             month = int(month)
             year  = int(year)
         except ValueError:
             return Response({'error': 'month va year son bo\'lishi kerak'}, status=400)
 
-        org = request.user.organization
+        user = request.user
+        org  = user.organization
 
-        # O'sha oydagi guruh biriktiruv (GroupAssignment)
-        assignments = (
-            GroupAssignment.objects
-            .filter(group__organization=org, month=month, year=year)
-            .select_related('group__major', 'shift', 'building')
-            .order_by('group__name')
+        # Dept_manager bo'lsa — faqat o'z kafedrasi
+        dept_filter = None
+        if user.role == 'dept_manager':
+            dept_filter = Department.objects.filter(
+                manager=user, organization=org
+            ).first()
+            if not dept_filter:
+                return Response({
+                    'month': month, 'year': year,
+                    'total_groups': 0, 'groups': [],
+                    'warning': "Siz hech qaysi kafedraning mudiri emassiz.",
+                })
+
+        # O'sha oyda kunlik biriktiruvi bor guruhlar (takrorlanmasdan)
+        group_ids = (
+            GroupDayAssignment.objects
+            .filter(
+                group__organization=org,
+                date__year=year,
+                date__month=month,
+            )
+            .values_list('group_id', flat=True)
+            .distinct()
         )
 
-        if not assignments.exists():
+        if not group_ids:
             return Response({
                 'month': month, 'year': year,
                 'total_groups': 0, 'groups': [],
-                'warning': f"{month}/{year} uchun guruh biriktiruvi topilmadi. "
-                           "Avval 'Guruh biriktiruv' qismida smena va bino biriktiring.",
+                'warning': (
+                    f"{month}/{year} uchun guruh kunlik biriktiruvi topilmadi. "
+                    "Avval 'Guruh biriktiruv' bo'limida kunlarga smena va bino biriktiring."
+                ),
             })
 
+        from academic.models import Group
+        groups = (
+            Group.objects
+            .filter(id__in=group_ids, organization=org)
+            .select_related('major')
+            .order_by('name')
+        )
+
         result = []
-        for ga in assignments:
-            group = ga.group
+        for group in groups:
             if not group.major_id:
                 continue
 
-            # Guruhning faol o'quv rejasi
+            # O'sha oydagi kunlik biriktiruv ma'lumotlari (birinchi yozuvdan smena/bino)
+            first_da = (
+                GroupDayAssignment.objects
+                .filter(group=group, date__year=year, date__month=month)
+                .select_related('shift', 'building')
+                .order_by('date')
+                .first()
+            )
+            shift_name    = first_da.shift.name    if first_da and first_da.shift    else '—'
+            building_name = first_da.building.name if first_da and first_da.building else '—'
+
+            # Faol o'quv rejasi
             curriculum = (
                 Curriculum.objects
                 .filter(major_id=group.major_id, status='active')
@@ -909,48 +1090,85 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                 )
                 .first()
             )
+
             if not curriculum:
                 result.append({
-                    'group_id':       group.id,
-                    'group_name':     group.name,
-                    'major_name':     group.major.name,
-                    'shift_name':     ga.shift.name if ga.shift else '—',
-                    'building_name':  ga.building.name if ga.building else '—',
-                    'curriculum':     None,
-                    'subjects':       [],
-                    'warning':        f"{group.major.name} uchun faol o'quv reja topilmadi.",
+                    'group_id':      group.id,
+                    'group_name':    group.name,
+                    'major_name':    group.major.name,
+                    'shift_name':    shift_name,
+                    'building_name': building_name,
+                    'curriculum':    None,
+                    'subjects':      [],
+                    'warning':       f"{group.major.name} uchun faol o'quv reja topilmadi.",
                 })
                 continue
 
+            # Shu yo'nalishda qaysi o'qituvchi qaysi fanni o'ta oladi
+            # (TeacherSubjectAssignment): subject_id -> [{id, name}]
+            eligible_map = {}
+            for tsa in (
+                TeacherSubjectAssignment.objects
+                .filter(major_id=group.major_id, teacher__organization=org)
+                .select_related('teacher__user')
+                .prefetch_related('subjects')
+            ):
+                tname = (tsa.teacher.user.get_full_name().strip()
+                         or tsa.teacher.user.username)
+                for subj in tsa.subjects.all():
+                    eligible_map.setdefault(subj.id, []).append({
+                        'id':   tsa.teacher_id,
+                        'name': tname,
+                    })
+
             subjects = []
             for block in curriculum.blocks.all():
-                for cs in block.subjects.all():
+                for cs in block.subjects.select_related(
+                    'subject', 'department', 'teacher_assignment__teacher__user'
+                ).all():
+                    # dept_manager: faqat o'z kafedrasi fanlari
+                    if dept_filter and cs.department_id != dept_filter.id:
+                        continue
+
+                    # O'qituvchi ma'lumoti
+                    ta = getattr(cs, 'teacher_assignment', None)
+                    teacher_id   = ta.teacher_id             if ta and ta.teacher else None
+                    teacher_name = ta.teacher.user.get_full_name() if ta and ta.teacher else None
+
                     subjects.append({
                         'curriculum_subject_id': cs.id,
-                        'block_name':       block.name or f'{block.order}-blok',
-                        'subject_id':       cs.subject_id,
-                        'subject_name':     cs.subject.name,
-                        'subject_code':     cs.subject.code,
-                        'department_id':    cs.department_id,
-                        'department_name':  cs.department.name if cs.department else None,
-                        'lecture_hours':    cs.lecture_hours,
-                        'practice_hours':   cs.practice_hours,
-                        'field_hours':      cs.field_hours,
-                        'independent_hours':cs.independent_hours,
-                        'auditorium_hours': cs.auditorium_hours,
-                        'grand_total_hours':cs.grand_total_hours,
-                        'week1_hours':      cs.week1_hours,
-                        'week2_hours':      cs.week2_hours,
-                        'week3_hours':      cs.week3_hours,
-                        'week4_hours':      cs.week4_hours,
+                        'module_number':     f"{block.order}.{cs.order}",
+                        'block_name':        block.name or f'{block.order}-blok',
+                        'subject_id':        cs.subject_id,
+                        'subject_name':      cs.subject.name,
+                        'subject_code':      cs.subject.code,
+                        'department_id':     cs.department_id,
+                        'department_name':   cs.department.name if cs.department else None,
+                        'teacher_id':        teacher_id,
+                        'teacher_name':      teacher_name,
+                        'eligible_teachers': eligible_map.get(cs.subject_id, []),
+                        'lecture_hours':     cs.lecture_hours,
+                        'practice_hours':    cs.practice_hours,
+                        'field_hours':       cs.field_hours,
+                        'independent_hours': cs.independent_hours,
+                        'auditorium_hours':  cs.auditorium_hours,
+                        'grand_total_hours': cs.grand_total_hours,
+                        'week1_hours':       cs.week1_hours,
+                        'week2_hours':       cs.week2_hours,
+                        'week3_hours':       cs.week3_hours,
+                        'week4_hours':       cs.week4_hours,
                     })
+
+            # dept_manager va bu guruhda o'z kafedrasiga biriktirilgan fan yo'q bo'lsa — o'tkazib yuborish
+            if dept_filter and not subjects:
+                continue
 
             result.append({
                 'group_id':      group.id,
                 'group_name':    group.name,
                 'major_name':    group.major.name,
-                'shift_name':    ga.shift.name if ga.shift else '—',
-                'building_name': ga.building.name if ga.building else '—',
+                'shift_name':    shift_name,
+                'building_name': building_name,
                 'curriculum':    curriculum.name,
                 'subjects':      subjects,
                 'warning':       None,
@@ -961,6 +1179,55 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
             'year':         year,
             'total_groups': len(result),
             'groups':       result,
+        })
+
+    @action(detail=False, methods=['post'], url_path='set-subject-teacher',
+            permission_classes=[IsAuthenticated])
+    def set_subject_teacher(self, request):
+        """
+        POST /api/v1/load-sheets/set-subject-teacher/
+        {
+          "curriculum_subject_id": 12,
+          "teacher_id": 5          ← null bo'lsa biriktiruvni olib tashlaydi
+        }
+        """
+        from academic.models import CurriculumSubject
+
+        cs_id      = request.data.get('curriculum_subject_id')
+        teacher_id = request.data.get('teacher_id')  # None = olib tashlash
+
+        if not cs_id:
+            return Response({'error': 'curriculum_subject_id talab qilinadi'}, status=400)
+
+        cs = CurriculumSubject.objects.filter(
+            id=cs_id,
+            block__curriculum__major__organization=request.user.organization,
+        ).first()
+        if not cs:
+            return Response({'error': 'Fan topilmadi'}, status=404)
+
+        if teacher_id:
+            teacher = Teacher.objects.filter(
+                id=teacher_id,
+                organization=request.user.organization,
+            ).first()
+            if not teacher:
+                return Response({'error': "O'qituvchi topilmadi"}, status=404)
+        else:
+            teacher = None
+
+        st, _ = SubjectTeacher.objects.update_or_create(
+            curriculum_subject=cs,
+            defaults={
+                'teacher':     teacher,
+                'assigned_by': request.user,
+            },
+        )
+
+        return Response({
+            'curriculum_subject_id': cs_id,
+            'teacher_id':   teacher.id            if teacher else None,
+            'teacher_name': teacher.user.get_full_name() if teacher else None,
         })
 
     @action(detail=False, methods=['get'], url_path='template',
