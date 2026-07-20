@@ -19,7 +19,7 @@ class OrganizationViewSet(viewsets.ModelViewSet):
 
 class BuildingViewSet(viewsets.ModelViewSet):
     serializer_class = BuildingSerializer
-    permission_classes = [IsOrgAdmin]
+    permission_classes = [IsOrgAdminOrReadOnly]
 
     def get_queryset(self):
         return Building.objects.filter(
@@ -32,7 +32,7 @@ class BuildingViewSet(viewsets.ModelViewSet):
 
 class RoomViewSet(viewsets.ModelViewSet):
     serializer_class = RoomSerializer
-    permission_classes = [IsOrgAdmin]
+    permission_classes = [IsOrgAdminOrReadOnly]
 
     def get_queryset(self):
         return Room.objects.filter(
