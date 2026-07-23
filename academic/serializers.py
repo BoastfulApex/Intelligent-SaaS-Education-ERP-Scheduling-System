@@ -92,7 +92,7 @@ class GroupSerializer(serializers.ModelSerializer):
         fields = ['id', 'organization', 'major', 'major_name',
                   'name', 'student_count', 'month', 'month_display',
                   'year', 'start_date', 'end_date', 'is_active']
-        read_only_fields = ['id', 'organization']
+        read_only_fields = ['id', 'organization', 'month', 'year']
 
 
 class ParaSerializer(serializers.ModelSerializer):

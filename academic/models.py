@@ -264,6 +264,13 @@ class Group(models.Model):
         verbose_name_plural = "Guruhlar"
         unique_together = ['organization', 'name', 'month', 'year']
 
+    def save(self, *args, **kwargs):
+        # month/year qo'lda kiritilmaydi — har doim boshlanish sanasidan avtomatik olinadi
+        if self.start_date:
+            self.month = self.start_date.month
+            self.year = self.start_date.year
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.year} {self.get_month_display()} — {self.name}"
     
