@@ -632,6 +632,36 @@ class CurriculumBlockViewSet(viewsets.ModelViewSet):
             qs = qs.filter(curriculum_id=curriculum_id)
         return qs
 
+    @action(detail=False, methods=['post'])
+    def reorder(self, request):
+        """
+        Bloklarni sudrab-tashlash orqali qayta tartiblash (CurriculumsPage.jsx — Tahrirlash oynasi).
+        Body: {"curriculum_id": <id>, "block_ids": [<id>, ...]}  — yangi tartibda, birinchisi 1-blok bo'ladi.
+        """
+        curriculum_id = request.data.get('curriculum_id')
+        block_ids = request.data.get('block_ids') or []
+        if not curriculum_id or not block_ids:
+            return Response({'error': 'curriculum_id va block_ids talab qilinadi'}, status=status.HTTP_400_BAD_REQUEST)
+
+        blocks = CurriculumBlock.objects.filter(
+            curriculum_id=curriculum_id,
+            curriculum__major__organization=request.user.organization,
+            id__in=block_ids,
+        )
+        if blocks.count() != len(block_ids):
+            return Response({'error': "Ba'zi bloklar topilmadi"}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            # unique_together = ['curriculum', 'order'] to'qnashuvining oldini olish uchun
+            # avval vaqtinchalik (katta) qiymatlarga o'tkaziladi, keyin yakuniy tartib qo'yiladi
+            for block in blocks:
+                CurriculumBlock.objects.filter(id=block.id).update(order=block.order + 10000)
+            for i, block_id in enumerate(block_ids, start=1):
+                CurriculumBlock.objects.filter(id=block_id).update(order=i)
+
+        updated = CurriculumBlock.objects.filter(curriculum_id=curriculum_id).order_by('order')
+        return Response(CurriculumBlockSerializer(updated, many=True).data)
+
 
 class CurriculumSubjectViewSet(viewsets.ModelViewSet):
     serializer_class = CurriculumSubjectSerializer
