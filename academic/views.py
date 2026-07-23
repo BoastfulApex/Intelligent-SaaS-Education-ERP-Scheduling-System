@@ -2,6 +2,7 @@ import re
 import pandas as pd
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -707,9 +708,22 @@ class CurriculumSubjectViewSet(viewsets.ModelViewSet):
         return Response({'updated': updated, 'errors': errors})
 
 
+class GroupPagination(PageNumberPagination):
+    """
+    Global PAGE_SIZE=20 dan farqli — ?page_size= orqali oshirish imkonini beradi.
+    Guruh biriktirish kalendari (GroupAssignmentsPage.jsx) barcha guruhlarni bitta
+    so'rovda (page_size=300) olishga tayanadi; page_size_query_param sozlanmagan bo'lsa
+    bu parametr jimgina e'tiborga olinmay, doim faqat birinchi 20 tasi qaytardi
+    (haqiqiy bug — group-day-assignments.md dagi pagination-trap bilan bir xil turkum).
+    """
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+
 class GroupViewSet(viewsets.ModelViewSet):
     serializer_class = GroupSerializer
     permission_classes = [IsEduAdminWriteMethodistRead]
+    pagination_class = GroupPagination
 
     def get_queryset(self):
         return Group.objects.filter(
