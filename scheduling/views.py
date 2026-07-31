@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
 from django.db.models import Q, Count
 from django.http import HttpResponse
@@ -305,6 +306,18 @@ class TeacherViewSet(viewsets.ModelViewSet):
         return qs
 
 
+class TeacherBusyTimePagination(PageNumberPagination):
+    """
+    Global PAGE_SIZE=20 dan farqli — ?page_size= orqali oshirish imkonini beradi.
+    BusyTimesPage.jsx'dagi kalendar (bitta o'qituvchi + bitta oy) 31 tagacha yozuv
+    qaytarishi mumkin — page_size_query_param sozlanmagan bo'lsa bu jimgina e'tiborga
+    olinmay, faqat birinchi 20 tasi qaytardi (xuddi Group/Room'da uchragan bug bilan
+    bir xil turkum — group-day-assignments.md).
+    """
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+
 class TeacherBusyTimeViewSet(viewsets.ModelViewSet):
     """
     O'qituvchining band vaqtlarini boshqarish.
@@ -322,6 +335,7 @@ class TeacherBusyTimeViewSet(viewsets.ModelViewSet):
     """
     serializer_class   = TeacherBusyTimeSerializer
     permission_classes = [IsDeptManager]
+    pagination_class   = TeacherBusyTimePagination
 
     def get_queryset(self):
         qs     = TeacherBusyTime.objects.filter(
