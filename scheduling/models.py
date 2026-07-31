@@ -352,6 +352,11 @@ class ScheduleEntry(models.Model):
     )
     para            = models.ForeignKey('academic.Para', on_delete=models.CASCADE)
     date            = models.DateField(verbose_name="Dars sanasi")
+    is_online       = models.BooleanField(
+        default=False,
+        verbose_name="Onlayn (Zoom)",
+        help_text="Belgilangan bo'lsa — dars Zoom orqali o'tiladi, room/building bo'sh qoladi"
+    )
     is_substituted  = models.BooleanField(default=False)
     created_at      = models.DateTimeField(auto_now_add=True)
 

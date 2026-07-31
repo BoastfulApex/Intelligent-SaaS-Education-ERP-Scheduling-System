@@ -272,7 +272,8 @@ def _get_or_create_subject(code: str, name: str, organization) -> tuple:
 
 
 def parse_curriculum_excel(file, major: Major, organization,
-                           curriculum_name: str = '', approved_date=None) -> dict:
+                           curriculum_name: str = '', approved_date=None,
+                           delivery_mode: str = 'offline') -> dict:
     """
     O'quv reja Excel faylini o'qib, Curriculum + Block + Subject larni yaratadi.
 
@@ -313,14 +314,18 @@ def parse_curriculum_excel(file, major: Major, organization,
 
     # ── CURRICULUM YARATISH (mavjud bo'lsa arxivlash) ─────────────────────────
     with transaction.atomic():
-        # Avvalgi faol reja arxivlash
+        # Avvalgi faol reja arxivlash — faqat bir xil o'qitish turi (oflayn/onlayn)
+        # ichida: onlayn reja yuklanganda oflayn reja tegilmasin (va aksincha), chunki
+        # ular mustaqil, alohida "muddat" (approved_date) bo'yicha boshqariladi
         Curriculum.objects.filter(
             major=major,
+            delivery_mode=delivery_mode,
             status=Curriculum.Status.ACTIVE,
         ).update(status=Curriculum.Status.ARCHIVED)
 
         curriculum = Curriculum.objects.create(
             major=major,
+            delivery_mode=delivery_mode,
             name=course_name,
             status=Curriculum.Status.ACTIVE,
             approved_date=approved_date,
@@ -551,6 +556,7 @@ class CurriculumViewSet(viewsets.ModelViewSet):
 
         curriculum_name = request.data.get('name', '')
         approved_date   = request.data.get('approved_date') or None
+        delivery_mode   = request.data.get('delivery_mode') or 'offline'
 
         try:
             result = parse_curriculum_excel(
@@ -559,6 +565,7 @@ class CurriculumViewSet(viewsets.ModelViewSet):
                 organization=request.user.organization,
                 curriculum_name=curriculum_name,
                 approved_date=approved_date,
+                delivery_mode=delivery_mode,
             )
         except Exception as e:
             return Response(

@@ -65,16 +65,18 @@ class CurriculumBlockSerializer(serializers.ModelSerializer):
 
 
 class CurriculumSerializer(serializers.ModelSerializer):
-    major_name         = serializers.CharField(source='major.name', read_only=True)
-    status_display     = serializers.CharField(source='get_status_display', read_only=True)
-    study_form_display = serializers.CharField(source='get_study_form_display', read_only=True)
-    blocks             = CurriculumBlockSerializer(many=True, read_only=True)
+    major_name           = serializers.CharField(source='major.name', read_only=True)
+    status_display       = serializers.CharField(source='get_status_display', read_only=True)
+    study_form_display   = serializers.CharField(source='get_study_form_display', read_only=True)
+    delivery_mode_display = serializers.CharField(source='get_delivery_mode_display', read_only=True)
+    blocks               = CurriculumBlockSerializer(many=True, read_only=True)
 
     class Meta:
         model = Curriculum
         fields = [
             'id', 'major', 'major_name', 'name',
             'contingent', 'study_form', 'study_form_display',
+            'delivery_mode', 'delivery_mode_display',
             'duration_weeks', 'total_hours',
             'status', 'status_display', 'approved_date',
             'blocks',
@@ -84,14 +86,16 @@ class CurriculumSerializer(serializers.ModelSerializer):
 
 
 class GroupSerializer(serializers.ModelSerializer):
-    major_name    = serializers.CharField(source='major.name', read_only=True)
-    month_display = serializers.CharField(source='get_month_display', read_only=True)
+    major_name           = serializers.CharField(source='major.name', read_only=True)
+    month_display        = serializers.CharField(source='get_month_display', read_only=True)
+    delivery_mode_display = serializers.CharField(source='get_delivery_mode_display', read_only=True)
 
     class Meta:
         model = Group
         fields = ['id', 'organization', 'major', 'major_name',
                   'name', 'student_count', 'month', 'month_display',
-                  'year', 'start_date', 'end_date', 'is_active']
+                  'year', 'start_date', 'end_date', 'is_active',
+                  'delivery_mode', 'delivery_mode_display']
         read_only_fields = ['id', 'organization', 'month', 'year']
 
 

@@ -139,6 +139,7 @@ class ScheduleEntrySerializer(serializers.ModelSerializer):
                   'group', 'group_name', 'subject', 'subject_name',
                   'lesson_type', 'lesson_type_display',
                   'room', 'room_name', 'building', 'building_name',
+                  'is_online',
                   'para', 'para_name', 'start_time', 'end_time',
                   'date', 'weekday_display', 'is_substituted']
         read_only_fields = ['id']

@@ -25,7 +25,7 @@ from .serializers import (TeacherSerializer, TeacherBusyTimeSerializer,
                            ScheduleEntrySerializer, SubstitutionSerializer,
                            AuditLogSerializer,
                            LoadSheetSerializer)
-from academic.models import Para, GroupAssignment, Group, CurriculumSubject, Curriculum
+from academic.models import Para, GroupAssignment, Group, CurriculumSubject, Curriculum, DeliveryMode
 from organizations.models import Room, Department
 
 
@@ -570,14 +570,19 @@ class TeacherSubjectAssignmentViewSet(viewsets.ModelViewSet):
         result = []
         today = datetime.date.today()
         for major in majors:
-            curriculum = Curriculum.get_active_for_date(
-                major, target_date=today,
-                queryset=Curriculum.objects.prefetch_related('blocks__subjects__subject'),
-            )
-
+            # O'qituvchini fanga biriktirish uning onlayn/oflayn dars berish-bermasligiga
+            # bog'liq emas — shu yo'nalishning HAR IKKI turdagi (oflayn va onlayn) faol
+            # o'quv rejasidan fanlar birlashtiriladi (bir xil fan ikkalasida ham bo'lishi
+            # mumkin, seen_ids orqali dublikat qilinmaydi)
             subjects = []
             seen_ids = set()
-            if curriculum:
+            for dm in (DeliveryMode.OFFLINE, DeliveryMode.ONLINE):
+                curriculum = Curriculum.get_active_for_date(
+                    major, target_date=today, delivery_mode=dm,
+                    queryset=Curriculum.objects.prefetch_related('blocks__subjects__subject'),
+                )
+                if not curriculum:
+                    continue
                 for block in curriculum.blocks.all():
                     for cs in block.subjects.all():
                         # Kafedra bo'yicha filtr (teacher_id berilgan bo'lsa)
@@ -1072,6 +1077,8 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
             if not group.major_id:
                 continue
 
+            is_online = group.delivery_mode == DeliveryMode.ONLINE
+
             # O'sha oydagi kunlik biriktiruv ma'lumotlari (birinchi yozuvdan smena/bino)
             first_da = (
                 GroupDayAssignment.objects
@@ -1080,15 +1087,21 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                 .order_by('date')
                 .first()
             )
-            shift_name    = first_da.shift.name    if first_da and first_da.shift    else '—'
-            building_name = first_da.building.name if first_da and first_da.building else '—'
+            shift_name = first_da.shift.name if first_da and first_da.shift else '—'
+            # Onlayn guruhda bino umuman kerak emas — "Bino biriktirilmagan" (xato) bo'limi
+            # o'rniga aniq "Onlayn (Zoom)" ko'rsatiladi (LoadSheetPage.jsx guruhlash uchun)
+            building_name = (
+                'Onlayn (Zoom)' if is_online
+                else (first_da.building.name if first_da and first_da.building else '—')
+            )
 
-            # Faol o'quv rejasi — shu oy uchun amal qiluvchisi (approved_date bo'yicha,
-            # academic/models.py::Curriculum.get_active_for_date)
+            # Faol o'quv rejasi — shu oy va shu guruhning turi (onlayn/oflayn) uchun
+            # amal qiluvchisi (approved_date bo'yicha, academic/models.py::Curriculum.get_active_for_date)
             month_end_day = calendar.monthrange(year, month)[1]
             curriculum = Curriculum.get_active_for_date(
                 group.major,
                 target_date=datetime.date(year, month, month_end_day),
+                delivery_mode=group.delivery_mode,
                 queryset=Curriculum.objects.prefetch_related(
                     'blocks__subjects__subject',
                     'blocks__subjects__department',
@@ -1102,6 +1115,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                     'major_name':    group.major.name,
                     'shift_name':    shift_name,
                     'building_name': building_name,
+                    'is_online':     is_online,
                     'curriculum':    None,
                     'subjects':      [],
                     'warning':       f"{group.major.name} uchun faol o'quv reja topilmadi.",
@@ -1173,6 +1187,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                 'major_name':    group.major.name,
                 'shift_name':    shift_name,
                 'building_name': building_name,
+                'is_online':     is_online,
                 'curriculum':    curriculum.name,
                 'subjects':      subjects,
                 'warning':       None,

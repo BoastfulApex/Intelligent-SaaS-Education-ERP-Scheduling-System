@@ -2,6 +2,15 @@ from django.db import models
 from django.utils import timezone
 
 
+class DeliveryMode(models.TextChoices):
+    """
+    Dars o'tilish turi — Curriculum va Group ikkalasida ham ishlatiladi.
+    Oflayn — bino/xonaga bog'liq; Onlayn — Zoom orqali, smena kerak, bino kerak emas.
+    """
+    OFFLINE = 'offline', 'Oflayn'
+    ONLINE  = 'online',  'Onlayn (Zoom)'
+
+
 class Major(models.Model):
     organization = models.ForeignKey('organizations.Organization', on_delete=models.CASCADE, related_name='majors')
     name         = models.CharField(max_length=255, verbose_name="Yo'nalish nomi")
@@ -80,6 +89,15 @@ class Curriculum(models.Model):
         default=StudyForm.FULLTIME,
         verbose_name="O'qish shakli"
     )
+    delivery_mode  = models.CharField(
+        max_length=20,
+        choices=DeliveryMode.choices,
+        default=DeliveryMode.OFFLINE,
+        verbose_name="O'qitish turi",
+        help_text="Oflayn yoki onlayn (Zoom) — bir yo'nalishda ikkalasi mustaqil ravishda "
+                   "bir vaqtda mavjud bo'lishi mumkin (masalan bitta oflayn, bitta onlayn "
+                   "faol o'quv reja), har biri o'z tasdiqlangan sanasi bo'yicha almashinadi"
+    )
     duration_weeks = models.PositiveSmallIntegerField(
         default=4,
         verbose_name="Kurs muddati (hafta)"
@@ -112,7 +130,7 @@ class Curriculum(models.Model):
         self.save()
 
     @classmethod
-    def get_active_for_date(cls, major, target_date=None, queryset=None):
+    def get_active_for_date(cls, major, target_date=None, delivery_mode=None, queryset=None):
         """
         Berilgan sanada amal qiluvchi o'quv rejani topadi.
 
@@ -135,6 +153,11 @@ class Curriculum(models.Model):
         ham hech narsa topilmasa — joriy `status=active` reja zaxira sifatida
         qaytariladi (eski xulq-atvor, orqaga moslik uchun).
 
+        `delivery_mode` (`DeliveryMode.OFFLINE`/`ONLINE`) berilsa — faqat shu turdagi
+        rejalar orasidan qidiriladi (oflayn va onlayn rejalar bir yo'nalishda mustaqil
+        ravishda, alohida `approved_date`lari bilan mavjud bo'lishi mumkin).
+        Berilmasa (`None`) — turi farqi qilinmaydi, ikkalasi orasidan qidiriladi.
+
         `queryset` — chaqiruvchi tomondan `prefetch_related`/`select_related`
         qo'llangan boshlang'ich queryset berilishi mumkin (N+1 oldini olish uchun).
         Berilmasa `cls.objects`.
@@ -142,6 +165,8 @@ class Curriculum(models.Model):
         if target_date is None:
             target_date = timezone.now().date()
         qs = (queryset if queryset is not None else cls.objects).filter(major=major)
+        if delivery_mode is not None:
+            qs = qs.filter(delivery_mode=delivery_mode)
 
         dated = qs.filter(
             approved_date__isnull=False, approved_date__lte=target_date
@@ -312,6 +337,14 @@ class Group(models.Model):
     start_date    = models.DateField(verbose_name="Boshlanish sanasi", null=True, blank=True)
     end_date      = models.DateField(verbose_name="Tugash sanasi", null=True, blank=True)
     is_active     = models.BooleanField(default=True)
+    delivery_mode = models.CharField(
+        max_length=20,
+        choices=DeliveryMode.choices,
+        default=DeliveryMode.OFFLINE,
+        verbose_name="O'qitish turi",
+        help_text="Onlayn guruhlar uchun 'Guruh biriktirish'da faqat smena kerak, bino "
+                   "shart emas — jadval generatsiyasida xona/bino tanlanmaydi (Zoom)"
+    )
 
     class Meta:
         db_table = 'groups'

@@ -2,12 +2,16 @@
 OR-Tools CP-SAT asosida jadval generatsiya.
 
 Manbalar:
-  - LoadDistribution  → kim, qaysi fandan, qaysi guruhga, necha soat
-  - Para              → kunning vaqt uyachalari (1-para, 2-para, ...)
-  - GroupAssignment   → guruh qaysi smena + binoda
-  - TeacherBusyTime   → o'qituvchi band sanalar/vaqtlar
-  - Room              → xonalar (tur, sig'im)
-  - CurriculumSubject → haftalik soat taqsimoti (week1..week4)
+  - LoadDistribution    → kim, qaysi fandan, qaysi guruhga, necha soat
+  - Para                → kunning vaqt uyachalari (1-para, 2-para, ...)
+  - GroupDayAssignment  → guruh qaysi smena + binoda (kunlik kalendar — "Guruh biriktirish")
+  - TeacherBusyTime     → o'qituvchi band sanalar/vaqtlar
+  - Room                → xonalar (tur, sig'im)
+  - CurriculumSubject   → haftalik soat taqsimoti (week1..week4)
+
+Onlayn (Zoom) darslar: `Group.delivery_mode == 'online'` bo'lsa, guruhga faqat smena
+kerak — bino/xona talab qilinmaydi va tanlanmaydi (ScheduleEntry.is_online=True,
+room/building bo'sh qoladi).
 
 Chiqish:
   - list[ScheduleEntry] — DB ga yozilishga tayyor yozuvlar
@@ -20,7 +24,7 @@ from collections import defaultdict
 
 from ortools.sat.python import cp_model
 
-from academic.models import Para, Group, CurriculumSubject
+from academic.models import Para, Group, CurriculumSubject, GroupDayAssignment, DeliveryMode
 from organizations.models import Room
 from .models import (
     Teacher, TeacherBusyTime, LoadDistribution,
@@ -42,7 +46,8 @@ class Task:
     room_type:  str          # 'lecture' | 'practice' | 'field' | 'independent'
     hours:      int          # bajariladigan umumiy soat
     paras_needed: int        # hours // 2
-    building_id:  int        # guruh biriktirilgan bino
+    building_id:  int | None = None   # guruh biriktirilgan bino (onlaynda None)
+    is_online:    bool = False        # Group.delivery_mode == 'online' — xona/bino kerak emas
     requires_computer_room: bool = False   # Subject.requires_computer_room (IT/AKT fani)
 
     # Haftalik taqsimot (0 = cheklov yo'q)
@@ -55,6 +60,14 @@ class Slot:
     date:     datetime.date
     para_id:  int
     week_idx: int   # 0..3
+
+
+@dataclass
+class ResolvedAssignment:
+    """Bir guruh uchun shu davrda vakillik qiluvchi smena/bino/onlayn holati."""
+    shift_id:    int
+    building_id: int | None
+    is_online:   bool
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -109,6 +122,54 @@ def _teacher_busy_set(teacher_id: int,
             if bt.is_conflict(bt.date, p):
                 busy.add((bt.date, p.id))
     return busy
+
+
+def _resolve_group_assignments(organization,
+                               date_from: datetime.date,
+                               date_to: datetime.date) -> dict[int, ResolvedAssignment]:
+    """
+    Har bir guruh uchun berilgan davrdagi smena/bino/onlayn holatini aniqlaydi.
+
+    Manba — `GroupDayAssignment` ("Guruh biriktirish" kalendari, kunlik yozuvlar).
+    Eski `academic.models.GroupAssignment` (oylik) endi ISHLATILMAYDI — hech qanday
+    frontend sahifasi unga yozmaydi (o'lik jadval edi), shuning uchun jadval
+    generatsiyasi undan foydalansa har doim "smena/bino biriktirilmagan" berib
+    o'tkazib yuborardi.
+
+    Guruh uchun shu davrdagi ENG ERTA sanali yozuv vakillik qiladi — xuddi
+    `curriculum_preview`dagi (`scheduling/views.py`) `first_da` naqshi bilan bir xil,
+    shunda ikkala joy ham bir xil "oyning vakillik qiluvchi biriktiruvi" mantig'iga
+    tayanadi.
+
+    Guruh `delivery_mode='online'` bo'lsa — `building_id=None` bo'lishi kutiladi va
+    `is_online=True` qaytariladi (bino talab qilinmaydi, faqat smena kerak).
+    """
+    groups_by_id = {
+        g.id: g for g in Group.objects.filter(organization=organization)
+    }
+
+    first_by_group: dict[int, GroupDayAssignment] = {}
+    day_assignments = (
+        GroupDayAssignment.objects
+        .filter(group__organization=organization, date__range=(date_from, date_to),
+                shift__isnull=False)
+        .select_related('shift', 'building')
+        .order_by('date')
+    )
+    for da in day_assignments:
+        if da.group_id not in first_by_group:
+            first_by_group[da.group_id] = da
+
+    result: dict[int, ResolvedAssignment] = {}
+    for group_id, da in first_by_group.items():
+        group = groups_by_id.get(group_id)
+        is_online = bool(group and group.delivery_mode == DeliveryMode.ONLINE)
+        result[group_id] = ResolvedAssignment(
+            shift_id=da.shift_id,
+            building_id=da.building_id,
+            is_online=is_online,
+        )
+    return result
 
 
 def _lesson_type_for_subject(cs: CurriculumSubject | None) -> str:
@@ -222,15 +283,7 @@ def generate_schedule(
         }
 
     # ── 4. GURUH → SMENA + BINO + PARALAR ────────────────────────────────────
-    from academic.models import GroupAssignment
-    assignments = {
-        ga.group_id: ga
-        for ga in GroupAssignment.objects.filter(
-            group__organization=organization,
-            month=month,
-            year=year,
-        ).select_related('shift', 'building')
-    }
+    assignments = _resolve_group_assignments(organization, date_from, date_to)
 
     # ── 5. VAZIFALAR (Task) YARATISH ──────────────────────────────────────────
     tasks: list[Task] = []
@@ -246,7 +299,14 @@ def generate_schedule(
         ga = assignments.get(group_id)
         if ga is None:
             warnings.append(
-                f"Guruh #{group_id} uchun smena/bino biriktirilmagan — o'tkazib yuborildi."
+                f"Guruh #{group_id} uchun smena biriktirilmagan — o'tkazib yuborildi."
+            )
+            continue
+
+        # Oflayn guruhga bino shart — onlaynga (Zoom) kerak emas
+        if not ga.is_online and ga.building_id is None:
+            warnings.append(
+                f"Guruh #{group_id} (oflayn) uchun bino biriktirilmagan — o'tkazib yuborildi."
             )
             continue
 
@@ -278,6 +338,7 @@ def generate_schedule(
             hours=hours,
             paras_needed=hours // 2,
             building_id=ga.building_id,
+            is_online=ga.is_online,
             requires_computer_room=requires_computer_room,
             week_hours=week_hours,
         ))
@@ -406,24 +467,26 @@ def generate_schedule(
         group = Group.objects.filter(id=task.group_id).first()
         capacity = group.student_count if group else 1
 
-        # Xona tanlash
-        room = _select_room(
-            building_id=task.building_id,
-            lesson_type=task.room_type,
-            min_capacity=capacity,
-            used_room_ids=used_rooms[(slot.date, slot.para_id)],
-            requires_computer_room=task.requires_computer_room,
-        )
-        if room:
-            used_rooms[(slot.date, slot.para_id)].add(room.id)
-            if (task.requires_computer_room and room.room_type != 'computer'
-                    and task.subject_id not in no_computer_room_subjects):
-                no_computer_room_subjects.add(task.subject_id)
-                warnings.append(
-                    f"Fan #{task.subject_id} kompyuter xonasini talab qiladi, lekin "
-                    f"bino #{task.building_id}da bo'sh kompyuter xonasi topilmadi — "
-                    "boshqa xonaga joylashtirildi."
-                )
+        # Xona tanlash — onlayn vazifalar uchun umuman kerak emas (Zoom)
+        room = None
+        if not task.is_online:
+            room = _select_room(
+                building_id=task.building_id,
+                lesson_type=task.room_type,
+                min_capacity=capacity,
+                used_room_ids=used_rooms[(slot.date, slot.para_id)],
+                requires_computer_room=task.requires_computer_room,
+            )
+            if room:
+                used_rooms[(slot.date, slot.para_id)].add(room.id)
+                if (task.requires_computer_room and room.room_type != 'computer'
+                        and task.subject_id not in no_computer_room_subjects):
+                    no_computer_room_subjects.add(task.subject_id)
+                    warnings.append(
+                        f"Fan #{task.subject_id} kompyuter xonasini talab qiladi, lekin "
+                        f"bino #{task.building_id}da bo'sh kompyuter xonasi topilmadi — "
+                        "boshqa xonaga joylashtirildi."
+                    )
 
         entries.append(ScheduleEntry(
             schedule=schedule,
@@ -433,6 +496,7 @@ def generate_schedule(
             lesson_type=task.room_type,
             room=room,
             building_id=task.building_id,
+            is_online=task.is_online,
             para_id=slot.para_id,
             date=slot.date,
         ))
