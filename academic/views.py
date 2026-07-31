@@ -272,7 +272,7 @@ def _get_or_create_subject(code: str, name: str, organization) -> tuple:
 
 
 def parse_curriculum_excel(file, major: Major, organization,
-                           curriculum_name: str = '') -> dict:
+                           curriculum_name: str = '', approved_date=None) -> dict:
     """
     O'quv reja Excel faylini o'qib, Curriculum + Block + Subject larni yaratadi.
 
@@ -323,6 +323,7 @@ def parse_curriculum_excel(file, major: Major, organization,
             major=major,
             name=course_name,
             status=Curriculum.Status.ACTIVE,
+            approved_date=approved_date,
         )
 
         current_block   = None
@@ -549,6 +550,7 @@ class CurriculumViewSet(viewsets.ModelViewSet):
             )
 
         curriculum_name = request.data.get('name', '')
+        approved_date   = request.data.get('approved_date') or None
 
         try:
             result = parse_curriculum_excel(
@@ -556,6 +558,7 @@ class CurriculumViewSet(viewsets.ModelViewSet):
                 major=major,
                 organization=request.user.organization,
                 curriculum_name=curriculum_name,
+                approved_date=approved_date,
             )
         except Exception as e:
             return Response(

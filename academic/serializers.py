@@ -76,7 +76,7 @@ class CurriculumSerializer(serializers.ModelSerializer):
             'id', 'major', 'major_name', 'name',
             'contingent', 'study_form', 'study_form_display',
             'duration_weeks', 'total_hours',
-            'status', 'status_display',
+            'status', 'status_display', 'approved_date',
             'blocks',
             'created_at', 'updated_at',
         ]

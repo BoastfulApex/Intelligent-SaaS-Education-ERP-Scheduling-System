@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 
 class Major(models.Model):
@@ -88,6 +89,12 @@ class Curriculum(models.Model):
         verbose_name="Jami soat"
     )
     status         = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    approved_date  = models.DateField(
+        null=True, blank=True,
+        verbose_name="Tasdiqlangan sana",
+        help_text="Shu sanadan boshlab ushbu o'quv reja qo'llaniladi — bir yo'nalishda "
+                   "bir nechta faol o'quv reja bo'lsa, tanlashda shu sana asos bo'ladi"
+    )
     created_at     = models.DateTimeField(auto_now_add=True)
     updated_at     = models.DateTimeField(auto_now=True)
 
@@ -103,6 +110,41 @@ class Curriculum(models.Model):
         """O'quv rejani arxivlash"""
         self.status = self.Status.ARCHIVED
         self.save()
+
+    @classmethod
+    def get_active_for_date(cls, major, target_date=None, queryset=None):
+        """
+        Berilgan sanada amal qiluvchi o'quv rejani topadi.
+
+        MUHIM: Excel qayta yuklanganda eskisi avtomatik arxivlanadi
+        (parse_curriculum_excel, `status=archived`ga o'tkaziladi) — shuning uchun
+        `approved_date` bo'yicha qidiruv **status'dan qat'iy nazar** (active HAM,
+        archived HAM) barcha o'quv rejalar orasidan olib boriladi: aks holda eski
+        (endi arxivlangan) reja o'ziga tegishli bo'lgan eski sanalar uchun ham
+        butunlay ko'rinmay qolib, "o'quv reja topilmadi" xatosiga olib kelardi.
+
+        `approved_date` target_date'dan oldin yoki teng bo'lganlar orasida eng
+        so'nggi tasdiqlangani tanlanadi — ya'ni yangi tasdiqlangan o'quv reja shu
+        sanadan boshlab eskisini almashtiradi, eskisi esa o'ziga tegishli (undan
+        oldingi) sanalar uchun hamon ishlatiladi.
+
+        Hech birida `approved_date` kiritilmagan (yoki hech biri target_date'ga mos
+        kelmaydigan) holatda — joriy `status=active` reja zaxira sifatida qaytariladi
+        (eski xulq-atvor, orqaga moslik uchun).
+
+        `queryset` — chaqiruvchi tomondan `prefetch_related`/`select_related`
+        qo'llangan boshlang'ich queryset berilishi mumkin (N+1 oldini olish uchun).
+        Berilmasa `cls.objects`.
+        """
+        if target_date is None:
+            target_date = timezone.now().date()
+        qs = (queryset if queryset is not None else cls.objects).filter(major=major)
+        dated = qs.filter(
+            approved_date__isnull=False, approved_date__lte=target_date
+        ).order_by('-approved_date', '-id').first()
+        if dated:
+            return dated
+        return qs.filter(status=cls.Status.ACTIVE).order_by('id').first()
         
 
 class CurriculumBlock(models.Model):

@@ -6,6 +6,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import transaction
 from django.db.models import Q, Count
 from django.http import HttpResponse
+import calendar
 import datetime
 import io
 import openpyxl
@@ -24,7 +25,7 @@ from .serializers import (TeacherSerializer, TeacherBusyTimeSerializer,
                            ScheduleEntrySerializer, SubstitutionSerializer,
                            AuditLogSerializer,
                            LoadSheetSerializer)
-from academic.models import Para, GroupAssignment, Group, CurriculumSubject
+from academic.models import Para, GroupAssignment, Group, CurriculumSubject, Curriculum
 from organizations.models import Room, Department
 
 
@@ -567,10 +568,12 @@ class TeacherSubjectAssignmentViewSet(viewsets.ModelViewSet):
         majors = Major.objects.filter(organization=org, is_active=True).order_by('name')
 
         result = []
+        today = datetime.date.today()
         for major in majors:
-            curriculum = Curriculum.objects.filter(
-                major=major, status='active'
-            ).prefetch_related('blocks__subjects__subject').first()
+            curriculum = Curriculum.get_active_for_date(
+                major, target_date=today,
+                queryset=Curriculum.objects.prefetch_related('blocks__subjects__subject'),
+            )
 
             subjects = []
             seen_ids = set()
@@ -1080,15 +1083,16 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
             shift_name    = first_da.shift.name    if first_da and first_da.shift    else '—'
             building_name = first_da.building.name if first_da and first_da.building else '—'
 
-            # Faol o'quv rejasi
-            curriculum = (
-                Curriculum.objects
-                .filter(major_id=group.major_id, status='active')
-                .prefetch_related(
+            # Faol o'quv rejasi — shu oy uchun amal qiluvchisi (approved_date bo'yicha,
+            # academic/models.py::Curriculum.get_active_for_date)
+            month_end_day = calendar.monthrange(year, month)[1]
+            curriculum = Curriculum.get_active_for_date(
+                group.major,
+                target_date=datetime.date(year, month, month_end_day),
+                queryset=Curriculum.objects.prefetch_related(
                     'blocks__subjects__subject',
                     'blocks__subjects__department',
-                )
-                .first()
+                ),
             )
 
             if not curriculum:
