@@ -9,6 +9,7 @@ from django.http import HttpResponse
 import calendar
 import datetime
 import io
+import re
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import pandas as pd
@@ -34,7 +35,8 @@ from organizations.models import Room, Department
 MONTH_MAP = {
     'yanvar': 1, 'fevral': 2, 'mart': 3, 'aprel': 4,
     'may': 5, 'iyun': 6, 'iyul': 7, 'avgust': 8,
-    'sentabr': 9, 'oktabr': 10, 'noyabr': 11, 'dekabr': 12,
+    'sentabr': 9, 'sentyabr': 9,   # ikkala imlo ham uchraydi
+    'oktabr': 10, 'noyabr': 11, 'dekabr': 12,
 }
 
 STAVKA_MAP = {
@@ -46,8 +48,26 @@ STAVKA_MAP = {
 
 
 def _detect_month(sheet_name: str) -> int | None:
-    """Sheet nomidan oy raqamini aniqlash."""
-    return MONTH_MAP.get(sheet_name.strip().lower())
+    """
+    Sheet nomidan oy raqamini aniqlash.
+
+    HAQIQIY BUG (topilgan): avval faqat aniq mos matn qabul qilinardi
+    (masalan "Yanvar") — "Yanvar 2026", "1-Yanvar", "Yanvar oyi" kabi ozgina
+    farq qiladigan sheet nomlari umuman tanilmay, o'sha oy butunlay
+    o'tkazib yuborilardi (hech qanday ogohlantirishsiz — "N ta oy yuklandi"
+    xabari faqat muvaffaqiyatli aniqlanganlarni sanardi).
+
+    Endi: sheet nomi so'zlarga (harf bo'lmagan belgilar bo'yicha) bo'linadi va
+    har bir so'z alohida oy nomiga solishtiriladi — shunda oy nomi atrofida
+    raqam/sana/qo'shimcha so'z bo'lsa ham to'g'ri aniqlanadi.
+    """
+    name = sheet_name.strip().lower()
+    if name in MONTH_MAP:
+        return MONTH_MAP[name]
+    for word in re.split(r'[^a-zʻʼ]+', name):
+        if word in MONTH_MAP:
+            return MONTH_MAP[word]
+    return None
 
 
 def _normalize_stavka(val) -> str:
@@ -136,15 +156,23 @@ def parse_load_sheet_excel(file, department: Department, year: int,
     """
     xl = pd.ExcelFile(file)
     results = []
+    # O'tkazib yuborilgan sheet'lar — foydalanuvchiga sababi bilan ko'rsatish uchun
+    # (haqiqiy bug: avval bu haqda hech qanday xabar qaytmasdi, oy "yo'qolib" ketardi)
+    skipped = []
 
     for sheet_name in xl.sheet_names:
         month = _detect_month(sheet_name)
         if month is None:
-            continue  # 'Yopilgan guruhlar' va boshqalarni o'tkazib yuborish
+            # 'Yopilgan guruhlar' kabi haqiqatan oy bo'lmagan sheet'lar ham,
+            # nomi tanilmagan haqiqiy oy sheet'lari ham shu yerga tushadi —
+            # foydalanuvchi ro'yxatni ko'rib, kerak bo'lsa sheet nomini to'g'rilaydi
+            skipped.append(f"«{sheet_name}» — oy nomi aniqlanmadi")
+            continue
 
         df = pd.read_excel(xl, sheet_name=sheet_name, header=None)
 
         if len(df) < 2:
+            skipped.append(f"«{sheet_name}» — bo'sh (ma'lumot qatorlari yo'q)")
             continue  # Bo'sh yoki faqat sarlavha bor sheet
 
         ncols = len(df.columns)
@@ -249,7 +277,7 @@ def parse_load_sheet_excel(file, department: Department, year: int,
                             teacher_load__load_sheet=load_sheet).count(),
         })
 
-    return results
+    return {'sheets': results, 'skipped': skipped}
 
 
 class TeacherViewSet(viewsets.ModelViewSet):
@@ -976,7 +1004,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
         year = int(request.data.get('year', datetime.date.today().year))
 
         try:
-            results = parse_load_sheet_excel(
+            parsed = parse_load_sheet_excel(
                 file=file,
                 department=dept,
                 year=year,
@@ -989,17 +1017,27 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        results = parsed['sheets']
+        skipped = parsed['skipped']
+
         if not results:
             return Response(
-                {'error': 'Excel faylda tan olinadigan oy sheeti topilmadi '
-                          '(Yanvar, Fevral, ... Dekabr bo\'lishi kerak).'},
+                {
+                    'error': 'Excel faylda tan olinadigan oy sheeti topilmadi '
+                             '(Yanvar, Fevral, ... Dekabr bo\'lishi kerak).',
+                    'skipped': skipped,
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         return Response({
-            'success': True,
-            'message': f'{len(results)} ta oy muvaffaqiyatli yuklandi.',
-            'sheets':  results,
+            'success':  True,
+            'message':  f'{len(results)} ta oy muvaffaqiyatli yuklandi.',
+            'sheets':   results,
+            # O'tkazib yuborilgan sheet'lar — foydalanuvchi biror oy "yo'qolib qolgan"
+            # deb o'ylamasligi uchun aniq ko'rsatiladi (haqiqiy bug tuzatildi:
+            # avval bu haqda hech qanday ma'lumot qaytmasdi)
+            'skipped':  skipped,
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['get'], url_path='curriculum-preview',
