@@ -128,9 +128,12 @@ class Curriculum(models.Model):
         sanadan boshlab eskisini almashtiradi, eskisi esa o'ziga tegishli (undan
         oldingi) sanalar uchun hamon ishlatiladi.
 
-        Hech birida `approved_date` kiritilmagan (yoki hech biri target_date'ga mos
-        kelmaydigan) holatda — joriy `status=active` reja zaxira sifatida qaytariladi
-        (eski xulq-atvor, orqaga moslik uchun).
+        target_date'ga mos `approved_date`li reja topilmasa (masalan target_date
+        versiyalash boshlanishidan OLDINGI davrga tegishli — birorta ham tasdiqlangan
+        sana hali kelmagan) — `approved_date`i umuman kiritilmagan rejalar orasidan
+        tanlanadi (joriy faoli, bo'lmasa eng so'nggi yaratilgani). Faqat shundan keyin
+        ham hech narsa topilmasa — joriy `status=active` reja zaxira sifatida
+        qaytariladi (eski xulq-atvor, orqaga moslik uchun).
 
         `queryset` — chaqiruvchi tomondan `prefetch_related`/`select_related`
         qo'llangan boshlang'ich queryset berilishi mumkin (N+1 oldini olish uchun).
@@ -139,11 +142,21 @@ class Curriculum(models.Model):
         if target_date is None:
             target_date = timezone.now().date()
         qs = (queryset if queryset is not None else cls.objects).filter(major=major)
+
         dated = qs.filter(
             approved_date__isnull=False, approved_date__lte=target_date
         ).order_by('-approved_date', '-id').first()
         if dated:
             return dated
+
+        # target_date barcha tasdiqlangan sanalardan oldingi davrga tegishli bo'lishi
+        # mumkin — bu holda sanasiz (eski, versiyalash boshlanishidan oldingi) reja
+        # to'g'ri javob bo'ladi, u arxivlangan bo'lsa ham
+        undated = qs.filter(approved_date__isnull=True)
+        undated_pick = undated.filter(status=cls.Status.ACTIVE).first() or undated.order_by('-id').first()
+        if undated_pick:
+            return undated_pick
+
         return qs.filter(status=cls.Status.ACTIVE).order_by('id').first()
         
 
