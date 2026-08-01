@@ -676,11 +676,18 @@ class CurriculumBlockViewSet(viewsets.ModelViewSet):
 class CurriculumSubjectViewSet(viewsets.ModelViewSet):
     serializer_class = CurriculumSubjectSerializer
     permission_classes = [IsEduAdminOrMethodist]
+    # Haqiqiy bug: global PAGE_SIZE=20 tufayli 20 tadan ortiq fani bor o'quv rejalarda
+    # "Fanlarga kafedra biriktirish" oynasi oxirgi fanlarni (masalan "Pedagogik amaliyot")
+    # butunlay ko'rsatmasdi — page_size=500 chaqiruvchi tomondan yuborilsa ham jimgina
+    # e'tiborga olinmasdi. Bu ro'yxat doim bitta curriculum_id bilan cheklangan (chekli
+    # hajmda), shuning uchun pagination butunlay o'chiriladi (GroupDayAssignmentViewSet
+    # bilan bir xil yechim).
+    pagination_class = None
 
     def get_queryset(self):
         qs = CurriculumSubject.objects.filter(
             block__curriculum__major__organization=self.request.user.organization
-        ).select_related('subject', 'block', 'department')
+        ).select_related('subject', 'block', 'department').order_by('block__order', 'order')
 
         curriculum_id = self.request.query_params.get('curriculum_id')
         if curriculum_id:
