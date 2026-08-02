@@ -479,6 +479,11 @@ class GroupSubject(models.Model):
         null=True, blank=True,
         related_name='group_subject_assignments'
     )
+    is_vacant = models.BooleanField(
+        default=False,
+        verbose_name="Vakant",
+        help_text="Fanga hali o'qituvchi ishga olinmagan — o'rin bo'sh deb belgilangan"
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

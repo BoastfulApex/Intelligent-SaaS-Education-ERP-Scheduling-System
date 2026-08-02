@@ -1214,6 +1214,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                     gs = gs_by_cs.get(cs.id)
                     teacher_id   = gs.teacher_id             if gs and gs.teacher else None
                     teacher_name = gs.teacher.user.get_full_name() if gs and gs.teacher else None
+                    is_vacant    = bool(gs and gs.is_vacant)
 
                     subjects.append({
                         'curriculum_subject_id': cs.id,
@@ -1227,6 +1228,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                         'department_name':   cs.department.name if cs.department else None,
                         'teacher_id':        teacher_id,
                         'teacher_name':      teacher_name,
+                        'is_vacant':         is_vacant,
                         'eligible_teachers': eligible_map.get(cs.subject_id, []),
                         'lecture_hours':     cs.lecture_hours,
                         'practice_hours':    cs.practice_hours,
@@ -1271,17 +1273,24 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
         {
           "curriculum_subject_id": 12,
           "group_id": 7,
-          "teacher_id": 5          ← null bo'lsa biriktiruvni olib tashlaydi
+          "teacher_id": 5,         ← null bo'lsa biriktiruvni olib tashlaydi
+          "is_vacant": true        ← ixtiyoriy, true bo'lsa "vakant" deb belgilaydi
         }
 
         Biriktiruv (GroupSubject) guruh + fan juftligiga tegishli — xuddi shu o'quv
         rejani ishlatuvchi BOSHQA guruhlarga ta'sir qilmaydi.
+
+        `is_vacant=true` — hali o'qituvchi ishga olinmagan fanni belgilash uchun
+        (`teacher_id` shu bilan birga bo'lmaydi). Keyinroq HAR QANDAY `teacher_id`
+        bilan qayta chaqirilsa — `is_vacant` avtomatik `False`ga tushadi (vakansiya
+        shu o'qituvchi bilan to'ldirildi deb hisoblanadi).
         """
         from academic.models import CurriculumSubject, Group
 
         cs_id      = request.data.get('curriculum_subject_id')
         group_id   = request.data.get('group_id')
         teacher_id = request.data.get('teacher_id')  # None = olib tashlash
+        is_vacant  = bool(request.data.get('is_vacant'))
 
         if not cs_id:
             return Response({'error': 'curriculum_subject_id talab qilinadi'}, status=400)
@@ -1308,6 +1317,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
             ).first()
             if not teacher:
                 return Response({'error': "O'qituvchi topilmadi"}, status=404)
+            is_vacant = False   # o'qituvchi tanlansa vakansiya avtomatik to'ldiriladi
         else:
             teacher = None
 
@@ -1317,6 +1327,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
             defaults={
                 'teacher':     teacher,
                 'assigned_by': request.user,
+                'is_vacant':   is_vacant,
             },
         )
 
@@ -1325,6 +1336,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
             'group_id':     group.id,
             'teacher_id':   teacher.id            if teacher else None,
             'teacher_name': teacher.user.get_full_name() if teacher else None,
+            'is_vacant':    is_vacant,
         })
 
     @action(detail=False, methods=['get'], url_path='template',
