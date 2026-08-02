@@ -281,9 +281,23 @@ def parse_load_sheet_excel(file, department: Department, year: int,
     return {'sheets': results, 'skipped': skipped}
 
 
+class TeacherPagination(PageNumberPagination):
+    """
+    Global PAGE_SIZE=20 dan farqli — ?page_size= orqali oshirish imkonini beradi.
+    LoadSheetPage.jsx (`getTeachers({ page_size: 500 })`, "Boshqalar" dropdown guruhi)
+    kabi joylar barcha o'qituvchilarni bitta so'rovda olishga tayanadi;
+    page_size_query_param sozlanmagan bo'lsa bu parametr jimgina e'tiborga olinmay,
+    doim faqat birinchi 20 tasi qaytardi (haqiqiy bug — group-day-assignments.md
+    dagi pagination-trap bilan bir xil turkum).
+    """
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+
 class TeacherViewSet(viewsets.ModelViewSet):
     serializer_class = TeacherSerializer
     permission_classes = [IsDeptManager]
+    pagination_class = TeacherPagination
 
     def get_queryset(self):
         qs = Teacher.objects.filter(
@@ -1204,8 +1218,13 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
             }
 
             subjects = []
+            has_any_subject = False
+            has_any_department_assigned = False
             for block in curriculum.blocks.all():
                 for cs in block.subjects.select_related('subject', 'department').all():
+                    has_any_subject = True
+                    if cs.department_id:
+                        has_any_department_assigned = True
                     # dept_manager: faqat o'z kafedrasi fanlari
                     if dept_filter and cs.department_id != dept_filter.id:
                         continue
@@ -1242,8 +1261,30 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                         'week4_hours':       cs.week4_hours,
                     })
 
-            # dept_manager va bu guruhda o'z kafedrasiga biriktirilgan fan yo'q bo'lsa — o'tkazib yuborish
+            # dept_manager va bu guruhda o'z kafedrasiga biriktirilgan fan yo'q bo'lsa:
+            # - agar butun o'quv rejada UMUMAN hech qaysi fanga kafedra biriktirilmagan
+            #   bo'lsa ("Fanlarga kafedra biriktirish" hali qilinmagan, masalan yangi
+            #   Excel yuklangandan keyin) — guruh jimgina yashirilmaydi, aksincha aniq
+            #   ogohlantirish bilan ko'rsatiladi. Aks holda (kafedralar biriktirilgan,
+            #   lekin bu kafedraga tegishli fan yo'q) — guruh haqiqatan bu kafedraga
+            #   tegishli emas, jimgina o'tkazib yuboriladi (avvalgi xatti-harakat).
             if dept_filter and not subjects:
+                if has_any_subject and not has_any_department_assigned:
+                    result.append({
+                        'group_id':      group.id,
+                        'group_name':    group.name,
+                        'major_name':    group.major.name,
+                        'shift_name':    shift_name,
+                        'building_name': building_name,
+                        'is_online':     is_online,
+                        'curriculum':    curriculum.name,
+                        'subjects':      [],
+                        'warning': (
+                            f"«{curriculum.name}» o'quv rejasidagi fanlarga hali kafedra "
+                            "biriktirilmagan — 'O'quv reja' bo'limida \"Fanlarga kafedra "
+                            "biriktirish\" orqali edu_admin/org_admin biriktirishi kerak."
+                        ),
+                    })
                 continue
 
             result.append({
