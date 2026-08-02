@@ -21,8 +21,14 @@ class UserViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         # O'qish (ro'yxat/detal) dept_manager+ ga ochiq — masalan o'qituvchi
         # biriktirish sahifasidagi foydalanuvchi dropdown'i uchun.
-        # Yozish (yaratish/tahrirlash/o'chirish) faqat org_admin da qoladi.
-        if self.action in ('list', 'retrieve'):
+        # Yozish (yaratish/tahrirlash/o'chirish) faqat org_admin da qoladi — BUNDAN
+        # TASHQARI 'upload_teachers' ("Ko'p qo'shish", /teacher-assign): frontend
+        # bu sahifani dept_manager uchun ochiq qilgan (App.jsx), lekin bu action
+        # hali ham faqat IsOrgAdmin talab qilardi — kafedra mudiri saqlashga bossa
+        # 403 qaytardi (DRF standart javobi {"detail": ...}, frontend faqat
+        # {"error": ...} kutgani uchun umumiy "Xato yuz berdi" ko'rsatilardi —
+        # haqiqiy, tekshirilmagan bug).
+        if self.action in ('list', 'retrieve', 'upload_teachers'):
             return [IsDeptManager()]
         if self.action in ('me', 'change_password'):
             return [IsAuthenticated()]
@@ -178,7 +184,10 @@ class UserViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['post'], url_path='upload-teachers',
-            permission_classes=[IsOrgAdmin],
+            # Eslatma: haqiqiy ruxsat get_permissions() da hal qilinadi (ViewSet uni
+            # override qilgani uchun bu yerdagi permission_classes amalda e'tiborga
+            # olinmaydi) — shu bilan birga izchillik uchun to'g'ri qiymat qo'yildi.
+            permission_classes=[IsDeptManager],
             parser_classes=[MultiPartParser, FormParser])
     def upload_teachers(self, request):
         """
@@ -194,6 +203,7 @@ class UserViewSet(viewsets.ModelViewSet):
           { created: [...], skipped: [...], errors: [...] }
         """
         from scheduling.models import Teacher
+        from organizations.models import Department
 
         file = request.FILES.get('file')
         if not file:
@@ -255,6 +265,17 @@ class UserViewSet(viewsets.ModelViewSet):
         created = []
         skipped = []
         errors  = []
+
+        # dept_manager o'zi qo'shgan o'qituvchilar avtomatik o'z kafedrasiga biriktiriladi
+        # (aks holda Teacher.department bo'sh qolib, hech qaysi kafedra mudiri ro'yxatida
+        # ko'rinmas edi — scoping shu maydonga tayanadi, roles-permissions.md ga qarang).
+        # org_admin qo'shganda bo'sh qoladi (u ko'p kafedra bilan ishlaydi, keyin
+        # "O'qituvchilar" sahifasida qo'lda biriktiradi).
+        dept_for_new_teachers = None
+        if request.user.role == 'dept_manager':
+            dept_for_new_teachers = Department.objects.filter(
+                manager=request.user, organization=org
+            ).first()
 
         import random, string
         def _make_password():
@@ -335,7 +356,9 @@ class UserViewSet(viewsets.ModelViewSet):
                 )
                 user.set_password(password)
                 user.save()
-                Teacher.objects.create(user=user, organization=org)
+                Teacher.objects.create(
+                    user=user, organization=org, department=dept_for_new_teachers
+                )
                 created.append({
                     'last_name':  last_name,
                     'first_name': first_name,

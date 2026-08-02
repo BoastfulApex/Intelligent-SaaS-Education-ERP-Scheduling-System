@@ -442,36 +442,50 @@ class AuditLog(models.Model):
         return f"[{self.timestamp:%d.%m.%Y %H:%M}] {self.user} | {self.get_action_display()} | {self.model_name}"
 
 
-class SubjectTeacher(models.Model):
+class GroupSubject(models.Model):
     """
-    O'quv reja fani (CurriculumSubject) ga o'qituvchi biriktiruvi.
+    Guruh + o'quv reja fani (CurriculumSubject) + o'qituvchi biriktiruvi.
     Kafedra mudiri taqsimot sahifasida to'g'ridan-to'g'ri belgilaydi.
+
+    Eski `SubjectTeacher` modeli o'rnini bosadi — u `curriculum_subject`ga OneToOne
+    bog'langan edi (guruhga bog'lanmagan), shuning uchun bitta o'quv rejani bir nechta
+    guruh ishlatsa (masalan bir xil yo'nalishdagi turli guruhlar), hammasi bitta umumiy
+    o'qituvchi yozuvini ko'rib/tahrir qilib turardi — bitta guruhda o'zgartirish boshqa
+    guruhlarga ham ta'sir qilardi (haqiqiy, tekshirilgan bug). Endi har bir guruh o'z
+    alohida o'qituvchisini olishi mumkin.
     """
-    curriculum_subject = models.OneToOneField(
+    curriculum_subject = models.ForeignKey(
         'academic.CurriculumSubject',
         on_delete=models.CASCADE,
-        related_name='teacher_assignment',
+        related_name='group_subjects',
         verbose_name="O'quv reja fani"
+    )
+    group = models.ForeignKey(
+        'academic.Group',
+        on_delete=models.CASCADE,
+        related_name='group_subjects',
+        verbose_name="Guruh"
     )
     teacher = models.ForeignKey(
         Teacher,
         on_delete=models.SET_NULL,
         null=True, blank=True,
-        related_name='direct_subject_assignments',
+        related_name='group_subject_assignments',
         verbose_name="O'qituvchi"
     )
     assigned_by = models.ForeignKey(
         'accounts.User',
         on_delete=models.SET_NULL,
         null=True, blank=True,
-        related_name='subject_teacher_assignments'
+        related_name='group_subject_assignments'
     )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'subject_teachers'
-        verbose_name = "Fan o'qituvchisi"
-        verbose_name_plural = "Fan o'qituvchilari"
+        db_table = 'group_subjects'
+        verbose_name = "Guruh fani"
+        verbose_name_plural = "Guruh fanlari"
+        unique_together = ['curriculum_subject', 'group']
 
     def __str__(self):
-        return f"{self.curriculum_subject} → {self.teacher}"
+        return f"{self.group} | {self.curriculum_subject} → {self.teacher}"

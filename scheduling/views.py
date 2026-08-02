@@ -20,7 +20,7 @@ from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
                      Substitution, AuditLog,
                      LoadSheet, TeacherLoad, LoadDistribution,
-                     SubjectTeacher)
+                     GroupSubject)
 from .serializers import (TeacherSerializer, TeacherBusyTimeSerializer,
                            TeacherSubjectAssignmentSerializer,
                            TeacherMonthlyLoadSerializer, ScheduleSerializer,
@@ -1191,22 +1191,33 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                         'name': tname,
                     })
 
+            # Shu GURUH uchun fanlarga biriktirilgan o'qituvchilar (GroupSubject) —
+            # curriculum_subject_id -> GroupSubject. Har bir guruh o'z alohida
+            # biriktiruvini oladi, xuddi shu o'quv rejani ishlatuvchi boshqa
+            # guruhlarga ta'sir qilmaydi (haqiqiy, tuzatilgan bug —
+            # load-sheet-teacher-assignment.md ga qarang).
+            gs_by_cs = {
+                gs.curriculum_subject_id: gs
+                for gs in GroupSubject.objects.filter(
+                    group=group, curriculum_subject__block__curriculum=curriculum
+                ).select_related('teacher__user')
+            }
+
             subjects = []
             for block in curriculum.blocks.all():
-                for cs in block.subjects.select_related(
-                    'subject', 'department', 'teacher_assignment__teacher__user'
-                ).all():
+                for cs in block.subjects.select_related('subject', 'department').all():
                     # dept_manager: faqat o'z kafedrasi fanlari
                     if dept_filter and cs.department_id != dept_filter.id:
                         continue
 
-                    # O'qituvchi ma'lumoti
-                    ta = getattr(cs, 'teacher_assignment', None)
-                    teacher_id   = ta.teacher_id             if ta and ta.teacher else None
-                    teacher_name = ta.teacher.user.get_full_name() if ta and ta.teacher else None
+                    # O'qituvchi ma'lumoti — shu GURUH uchun (GroupSubject)
+                    gs = gs_by_cs.get(cs.id)
+                    teacher_id   = gs.teacher_id             if gs and gs.teacher else None
+                    teacher_name = gs.teacher.user.get_full_name() if gs and gs.teacher else None
 
                     subjects.append({
                         'curriculum_subject_id': cs.id,
+                        'group_id':          group.id,
                         'module_number':     f"{block.order}.{cs.order}",
                         'block_name':        block.name or f'{block.order}-blok',
                         'subject_id':        cs.subject_id,
@@ -1259,16 +1270,23 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
         POST /api/v1/load-sheets/set-subject-teacher/
         {
           "curriculum_subject_id": 12,
+          "group_id": 7,
           "teacher_id": 5          ← null bo'lsa biriktiruvni olib tashlaydi
         }
+
+        Biriktiruv (GroupSubject) guruh + fan juftligiga tegishli — xuddi shu o'quv
+        rejani ishlatuvchi BOSHQA guruhlarga ta'sir qilmaydi.
         """
-        from academic.models import CurriculumSubject
+        from academic.models import CurriculumSubject, Group
 
         cs_id      = request.data.get('curriculum_subject_id')
+        group_id   = request.data.get('group_id')
         teacher_id = request.data.get('teacher_id')  # None = olib tashlash
 
         if not cs_id:
             return Response({'error': 'curriculum_subject_id talab qilinadi'}, status=400)
+        if not group_id:
+            return Response({'error': 'group_id talab qilinadi'}, status=400)
 
         cs = CurriculumSubject.objects.filter(
             id=cs_id,
@@ -1276,6 +1294,12 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
         ).first()
         if not cs:
             return Response({'error': 'Fan topilmadi'}, status=404)
+
+        group = Group.objects.filter(
+            id=group_id, organization=request.user.organization,
+        ).first()
+        if not group:
+            return Response({'error': 'Guruh topilmadi'}, status=404)
 
         if teacher_id:
             teacher = Teacher.objects.filter(
@@ -1287,8 +1311,9 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
         else:
             teacher = None
 
-        st, _ = SubjectTeacher.objects.update_or_create(
+        GroupSubject.objects.update_or_create(
             curriculum_subject=cs,
+            group=group,
             defaults={
                 'teacher':     teacher,
                 'assigned_by': request.user,
@@ -1297,6 +1322,7 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
 
         return Response({
             'curriculum_subject_id': cs_id,
+            'group_id':     group.id,
             'teacher_id':   teacher.id            if teacher else None,
             'teacher_name': teacher.user.get_full_name() if teacher else None,
         })
