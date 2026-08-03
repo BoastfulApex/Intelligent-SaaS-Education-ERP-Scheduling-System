@@ -2,12 +2,22 @@
 OR-Tools CP-SAT asosida jadval generatsiya.
 
 Manbalar:
-  - LoadDistribution    → kim, qaysi fandan, qaysi guruhga, necha soat
+  - GroupSubject        → guruh + o'quv reja fani + o'qituvchi biriktiruvi (haqiqiy
+                          "Taqsimot" manbai — LoadSheetPage.jsx, Excel talab qilmaydi)
+  - Curriculum          → guruhning faol o'quv rejasi (get_active_for_date)
   - Para                → kunning vaqt uyachalari (1-para, 2-para, ...)
   - GroupDayAssignment  → guruh qaysi smena + binoda (kunlik kalendar — "Guruh biriktirish")
   - TeacherBusyTime     → o'qituvchi band sanalar/vaqtlar
   - Room                → xonalar (tur, sig'im)
   - CurriculumSubject   → haftalik soat taqsimoti (week1..week4)
+
+**Muhim (haqiqiy bug, tuzatilgan)**: avval bu fayl vazifalarni faqat eski
+`LoadDistribution` modelidan (Excel yuklash oqimi orqali to'ldiriladigan) olar edi —
+lekin loyihaning hozirgi asosiy Taqsimot oqimi (`.claude/rules/load-sheet-teacher-
+assignment.md`) Excel talab qilmaydi, u to'g'ridan-to'g'ri `GroupSubject`ga yozadi.
+Natijada foydalanuvchi Taqsimot sahifasida barcha fanlarga o'qituvchi tayinlagan
+bo'lsa ham, `generate` har doim "taqsimot yuklanmagan" xatosi qaytarardi. Batafsil:
+`.claude/rules/schedule-generation.md`.
 
 Onlayn (Zoom) darslar: `Group.delivery_mode == 'online'` bo'lsa, guruhga faqat smena
 kerak — bino/xona talab qilinmaydi va tanlanmaydi (ScheduleEntry.is_online=True,
@@ -24,10 +34,12 @@ from collections import defaultdict
 
 from ortools.sat.python import cp_model
 
-from academic.models import Para, Group, CurriculumSubject, GroupDayAssignment, DeliveryMode
+from academic.models import (
+    Para, Group, CurriculumSubject, GroupDayAssignment, DeliveryMode, Curriculum,
+)
 from organizations.models import Room
 from .models import (
-    Teacher, TeacherBusyTime, LoadDistribution,
+    Teacher, TeacherBusyTime, GroupSubject,
     ScheduleEntry, Schedule,
 )
 
@@ -38,19 +50,21 @@ from .models import (
 
 @dataclass
 class Task:
-    """Bitta taqsimot yozuvidan yaratilgan vazifa."""
-    dist_id:    int          # LoadDistribution.id
+    """Bitta GroupSubject (guruh+fan+o'qituvchi) yozuvidan yaratilgan vazifa."""
+    dist_id:    int          # GroupSubject.id (traceability uchun)
     teacher_id: int
     group_id:   int
     subject_id: int
     room_type:  str          # 'lecture' | 'practice' | 'field' | 'independent'
     hours:      int          # bajariladigan umumiy soat
     paras_needed: int        # hours // 2
+    group_start: datetime.date   # guruhning shu oydagi haqiqiy boshlanish sanasi
+    group_end:   datetime.date   # guruhning shu oydagi haqiqiy tugash sanasi
     building_id:  int | None = None   # guruh biriktirilgan bino (onlaynda None)
     is_online:    bool = False        # Group.delivery_mode == 'online' — xona/bino kerak emas
     requires_computer_room: bool = False   # Subject.requires_computer_room (IT/AKT fani)
 
-    # Haftalik taqsimot (0 = cheklov yo'q)
+    # Haftalik taqsimot (0 = cheklov yo'q) — guruhning o'z group_start'idan hisoblanadi
     week_hours: list = field(default_factory=lambda: [0, 0, 0, 0])
 
 
@@ -254,59 +268,61 @@ def generate_schedule(
 
     para_by_id = {p.id: p for p in all_paras}
 
-    # ── 3. TAQSIMOT MA'LUMOTLARI (LoadDistribution) ───────────────────────────
-    distributions = (
-        LoadDistribution.objects
-        .filter(
-            teacher_load__load_sheet__department__organization=organization,
-            teacher_load__load_sheet__month=month,
-            teacher_load__load_sheet__year=year,
-            teacher_load__teacher__isnull=False,   # faqat bog'langan o'qituvchilar
-            group__isnull=False,                   # faqat bog'langan guruhlar
-            hours__gt=0,
-        )
-        .select_related(
-            'teacher_load__teacher__user',
-            'curriculum_subject__subject',
-            'group',
-        )
+    # ── 3. GURUHLAR (o'sha oyda kunlik biriktiruvi bor) ───────────────────────
+    # `curriculum_preview`dagi (`scheduling/views.py`) bilan bir xil naqsh — "oyning
+    # vakillik qiluvchi ma'lumoti" GroupDayAssignment orqali aniqlanadi.
+    group_ids_with_da = (
+        GroupDayAssignment.objects
+        .filter(group__organization=organization, date__year=year, date__month=month)
+        .values_list('group_id', flat=True)
+        .distinct()
+    )
+    groups = list(
+        Group.objects
+        .filter(id__in=group_ids_with_da, organization=organization, major__isnull=False)
+        .select_related('major')
     )
 
-    if not distributions.exists():
+    if not groups:
         return {
             'entries': [],
             'stats': {},
-            'warnings': [
-                'LoadDistribution topilmadi. '
-                'Taqsimot yuklangan va guruhlar bog\'langanmi?'
-            ],
+            'warnings': [f'{month}/{year} uchun guruh kunlik biriktiruvi topilmadi.'],
         }
 
     # ── 4. GURUH → SMENA + BINO + PARALAR ────────────────────────────────────
     assignments = _resolve_group_assignments(organization, date_from, date_to)
 
-    # ── 5. VAZIFALAR (Task) YARATISH ──────────────────────────────────────────
+    # ── 5. VAZIFALAR (Task) YARATISH — GroupSubject (haqiqiy Taqsimot manbai) ──
     tasks: list[Task] = []
+    unassigned_count = 0
+    month_end_day = calendar.monthrange(year, month)[1]
 
-    for dist in distributions:
-        group_id   = dist.group_id
-        teacher_id = dist.teacher_load.teacher_id
-        hours      = dist.hours
-
-        if hours < 2:
+    for group in groups:
+        curriculum = Curriculum.get_active_for_date(
+            group.major,
+            target_date=datetime.date(year, month, month_end_day),
+            delivery_mode=group.delivery_mode,
+            queryset=Curriculum.objects.prefetch_related('blocks__subjects__subject'),
+        )
+        if not curriculum:
+            warnings.append(
+                f"Guruh #{group.id} ({group.name}) uchun faol o'quv reja topilmadi — "
+                "o'tkazib yuborildi."
+            )
             continue
 
-        ga = assignments.get(group_id)
+        ga = assignments.get(group.id)
         if ga is None:
             warnings.append(
-                f"Guruh #{group_id} uchun smena biriktirilmagan — o'tkazib yuborildi."
+                f"Guruh #{group.id} uchun smena biriktirilmagan — o'tkazib yuborildi."
             )
             continue
 
         # Oflayn guruhga bino shart — onlaynga (Zoom) kerak emas
         if not ga.is_online and ga.building_id is None:
             warnings.append(
-                f"Guruh #{group_id} (oflayn) uchun bino biriktirilmagan — o'tkazib yuborildi."
+                f"Guruh #{group.id} (oflayn) uchun bino biriktirilmagan — o'tkazib yuborildi."
             )
             continue
 
@@ -316,32 +332,71 @@ def generate_schedule(
             warnings.append(f"Smena #{ga.shift_id} uchun paralar yo'q.")
             continue
 
-        cs = dist.curriculum_subject
-        lesson_type = _lesson_type_for_subject(cs)
-        requires_computer_room = bool(cs and cs.subject and cs.subject.requires_computer_room)
+        # Guruhning shu oydagi o'z muddati — Schedule global davri bilan kesishmasi.
+        # Har bir guruh o'z boshlanish sanasidan hisoblangan haftalik taqsimotga ega
+        # bo'lishi kerak (masalan 3-sentabrda boshlangan guruh va 7-sentabrda
+        # boshlangan guruhning "1-hafta"si turli kunlarga to'g'ri keladi).
+        g_start = max(group.start_date or date_from, date_from)
+        g_end   = min(group.end_date or date_to, date_to)
+        if g_start > g_end:
+            warnings.append(
+                f"Guruh #{group.id} ({group.name}) muddati ({group.start_date}—"
+                f"{group.end_date}) {month}/{year} bilan mos kelmaydi — o'tkazib yuborildi."
+            )
+            continue
 
-        week_hours = [0, 0, 0, 0]
-        if cs:
-            week_hours = [
-                cs.week1_hours or 0,
-                cs.week2_hours or 0,
-                cs.week3_hours or 0,
-                cs.week4_hours or 0,
-            ]
+        gs_by_cs = {
+            gs.curriculum_subject_id: gs
+            for gs in GroupSubject.objects.filter(
+                group=group,
+                curriculum_subject__block__curriculum=curriculum,
+                teacher__isnull=False,
+                is_vacant=False,
+            ).select_related('teacher')
+        }
 
-        tasks.append(Task(
-            dist_id=dist.id,
-            teacher_id=teacher_id,
-            group_id=group_id,
-            subject_id=dist.curriculum_subject.subject_id if cs else 0,
-            room_type=lesson_type,
-            hours=hours,
-            paras_needed=hours // 2,
-            building_id=ga.building_id,
-            is_online=ga.is_online,
-            requires_computer_room=requires_computer_room,
-            week_hours=week_hours,
-        ))
+        for block in curriculum.blocks.all():
+            for cs in block.subjects.select_related('subject').all():
+                gs = gs_by_cs.get(cs.id)
+                if not gs:
+                    unassigned_count += 1
+                    continue
+
+                hours = cs.auditorium_hours
+                if hours < 2:
+                    continue
+
+                lesson_type = _lesson_type_for_subject(cs)
+                requires_computer_room = bool(cs.subject and cs.subject.requires_computer_room)
+
+                week_hours = [
+                    cs.week1_hours or 0,
+                    cs.week2_hours or 0,
+                    cs.week3_hours or 0,
+                    cs.week4_hours or 0,
+                ]
+
+                tasks.append(Task(
+                    dist_id=gs.id,
+                    teacher_id=gs.teacher_id,
+                    group_id=group.id,
+                    subject_id=cs.subject_id,
+                    room_type=lesson_type,
+                    hours=hours,
+                    paras_needed=hours // 2,
+                    group_start=g_start,
+                    group_end=g_end,
+                    building_id=ga.building_id,
+                    is_online=ga.is_online,
+                    requires_computer_room=requires_computer_room,
+                    week_hours=week_hours,
+                ))
+
+    if unassigned_count:
+        warnings.append(
+            f"Jami {unassigned_count} ta fanga o'qituvchi biriktirilmagan yoki vakant "
+            "deb belgilangan — jadvalga kiritilmadi."
+        )
 
     if not tasks:
         return {
@@ -383,21 +438,80 @@ def generate_schedule(
             # Faqat o'qituvchi smenasidagi paralar
             if slot.para_id not in shift_para_ids:
                 continue
+            # Faqat guruhning O'Z muddati ichidagi kunlar (har guruh alohida
+            # boshlanish/tugash sanasiga ega bo'lishi mumkin — Group.start_date/end_date)
+            if slot.date < task.group_start or slot.date > task.group_end:
+                continue
             # O'qituvchi band bo'lsa o'tkazib yuborish
             if (slot.date, slot.para_id) in busy:
                 continue
             x[ti, si] = model.new_bool_var(f'x_{ti}_{si}')
 
-    # ── CONSTRAINT 1: Har vazifa kerakli para sonini olishi shart ─────────────
+    # ── HAFTALIK KVOTALARNI OLDINDAN HISOBLASH (Constraint 1 va 4 uchun) ──────
+    # Har ikkala cheklov ham izchil bo'lishi SHART: agar Constraint 4 allaqachon
+    # bironta haftani (masalan kech boshlangan guruh uchun 4-hafta) qisqartirgan
+    # bo'lsa, Constraint 1'ning UMUMIY talabi ham xuddi shu qisqartirilgan
+    # summaga mos kelishi kerak — aks holda ikkalasi bir-biriga zid qat'iy
+    # tenglik hosil qilib, butun modelni (BARCHA guruhlar uchun, chunki `x` bitta
+    # umumiy CP-SAT modelida baham ko'riladi) INFEASIBLE qilib qo'yadi (haqiqiy
+    # bug, tuzatilgan — .claude/rules/schedule-generation.md). Shuning uchun
+    # haftalik "talab qilinadigan" miqdorlar bir marta hisoblanadi va ikkala
+    # cheklov ham xuddi shu qiymatlardan foydalanadi.
+    task_week_required: dict[int, dict[int, int]] = {}
+    for ti, task in enumerate(tasks):
+        week_required: dict[int, int] = {}
+        for week_i, w_hours in enumerate(task.week_hours):
+            if w_hours <= 0:
+                continue
+            w_paras = w_hours // 2
+            week_vars = [
+                x[ti, si]
+                for si in range(len(slots))
+                if (ti, si) in x and _week_index(slots[si].date, task.group_start) == week_i
+            ]
+            if not week_vars:
+                continue
+            required = min(w_paras, len(week_vars))
+            if required < w_paras:
+                warnings.append(
+                    f"Guruh #{task.group_id} uchun {week_i + 1}-haftada yetarli kun/para "
+                    f"yo'q ({w_paras} kerak, {required} joy bor) — qisman joylashtirildi."
+                )
+            week_required[week_i] = required
+        task_week_required[ti] = week_required
+
+    # ── CONSTRAINT 1: Har vazifa kerakli para sonidan OSHMASLIGI shart ────────
+    # **Muhim**: qat'iy tenglik (`==`) emas, yuqori chegara (`<=`) — chunki bir
+    # nechta fan (bitta guruh, ko'pincha bitta o'qituvchi) bir vaqtda cheklangan
+    # slot pulidan foydalanadi (Constraint 2/3 — bitta guruh/o'qituvchi bir
+    # vaqtda faqat bitta darsda bo'lishi mumkin). Agar ularning YIG'INDI talabi
+    # fizik sig'imdan oshsa (masalan qisqa muddatli guruh + og'ir haftalik yuk),
+    # qat'iy tenglik butun modelni (BARCHA guruhlar uchun, `x` bitta umumiy
+    # modelda baham ko'rilgani sababli) INFEASIBLE qilib qo'yardi (haqiqiy bug,
+    # tuzatilgan). `<=` + quyidagi `model.maximize(sum(x.values()))` maqsadi
+    # birgalikda "iloji boricha ko'p joylashtirish" natijasini beradi — yetarli
+    # joy bo'lganda avvalgidek to'liq, yetmasa qisman.
     for ti, task in enumerate(tasks):
         vars_ = [x[ti, si] for si in range(len(slots)) if (ti, si) in x]
-        if vars_:
-            model.add(sum(vars_) == task.paras_needed)
-        else:
+        if not vars_:
             warnings.append(
                 f"Vazifa (teacher={task.teacher_id}, group={task.group_id}) "
                 f"uchun mos slot topilmadi — o'tkazib yuborildi."
             )
+            continue
+
+        week_required = task_week_required[ti]
+        if week_required:
+            required = sum(week_required.values())
+        else:
+            required = min(task.paras_needed, len(vars_))
+            if required < task.paras_needed:
+                warnings.append(
+                    f"Vazifa (teacher={task.teacher_id}, group={task.group_id}) uchun "
+                    f"yetarli slot yo'q ({task.paras_needed} kerak, {required} joy bor) — "
+                    "qisman joylashtirildi."
+                )
+        model.add(sum(vars_) <= required)
 
     # ── CONSTRAINT 2: O'qituvchi bir vaqtda faqat bir joyda ──────────────────
     teacher_slot: defaultdict[tuple, list] = defaultdict(list)
@@ -418,18 +532,20 @@ def generate_schedule(
             model.add(sum(vars_) <= 1)
 
     # ── CONSTRAINT 4: Haftalik soat taqsimoti ─────────────────────────────────
+    # Har bir guruhning "1-hafta"si o'zining group_start'idan hisoblanadi (global
+    # `slots[si].week_idx` emas) — har guruh alohida boshlanish sanasiga ega
+    # bo'lishi mumkin (haqiqiy bug, tuzatilgan). Qiymatlar yuqorida oldindan
+    # hisoblangan `task_week_required`dan olinadi (Constraint 1 bilan izchillik).
+    # Xuddi Constraint 1 kabi — `<=` (qat'iy tenglik emas), bir necha fan bir xil
+    # slot pulini baham ko'rganda butun modelni bloklab qo'ymasligi uchun.
     for ti, task in enumerate(tasks):
-        for week_i, w_hours in enumerate(task.week_hours):
-            if w_hours <= 0:
-                continue
-            w_paras = w_hours // 2
+        for week_i, required in task_week_required[ti].items():
             week_vars = [
                 x[ti, si]
                 for si in range(len(slots))
-                if (ti, si) in x and slots[si].week_idx == week_i
+                if (ti, si) in x and _week_index(slots[si].date, task.group_start) == week_i
             ]
-            if week_vars:
-                model.add(sum(week_vars) == w_paras)
+            model.add(sum(week_vars) <= required)
 
     # ── MAQSAD: Maksimal joylashtirilgan para soni ────────────────────────────
     model.maximize(sum(x.values()))

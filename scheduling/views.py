@@ -701,7 +701,7 @@ class ScheduleViewSet(viewsets.ModelViewSet):
         Body: { month, year, title, date_from(ixtiyoriy), date_to(ixtiyoriy), time_limit(ixtiyoriy) }
 
         Ketma-ketlik:
-          1. LoadDistribution dan vazifalar olinadi
+          1. GroupSubject (haqiqiy Taqsimot manbai) dan vazifalar olinadi
           2. OR-Tools CP-SAT yordamida jadval tuziladi
           3. ScheduleEntry lar yaratiladi
         """
@@ -739,16 +739,18 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             else:
                 date_to = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
 
-        # LoadDistribution mavjudligini tekshirish
-        from .models import LoadDistribution
-        if not LoadDistribution.objects.filter(
-            teacher_load__load_sheet__department__organization=org,
-            teacher_load__load_sheet__month=month,
-            teacher_load__load_sheet__year=year,
+        # Guruh kunlik biriktiruvi (GroupDayAssignment) mavjudligini tekshirish —
+        # bu haqiqiy Taqsimot manbai (GroupSubject) uchun zarur old shart, xuddi
+        # `curriculum_preview` bilan bir xil tekshiruv (LoadDistribution/Excel emas —
+        # batafsil `.claude/rules/schedule-generation.md`)
+        from academic.models import GroupDayAssignment
+        if not GroupDayAssignment.objects.filter(
+            group__organization=org, date__year=year, date__month=month,
         ).exists():
             return Response(
-                {'error': f'{month}/{year} uchun taqsimot yuklanmagan! '
-                          'Avval load-sheets/upload/ orqali taqsimot yuklang.'},
+                {'error': f'{month}/{year} uchun guruh kunlik biriktiruvi topilmadi. '
+                          "Avval 'Guruh biriktiruv' bo'limida kunlarga smena va bino "
+                          'biriktiring, so\'ng Taqsimotda fanlarga o\'qituvchi tayinlang.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
