@@ -848,6 +848,46 @@ class ScheduleViewSet(viewsets.ModelViewSet):
         ).order_by('date', 'para__order')
         return Response(ScheduleEntrySerializer(entries, many=True).data)
 
+    @action(detail=True, methods=['get'], url_path='filters', permission_classes=[IsAuthenticated])
+    def filters(self, request, pk=None):
+        """
+        GET /schedules/{id}/filters/
+
+        Frontend'dagi "Ko'rish" oynasidagi Guruh/O'qituvchi Select'lari uchun —
+        **butun tashkilotdagi barcha** guruh/o'qituvchi emas, faqat shu jadvalda
+        haqiqatan darsi bor guruh/o'qituvchilar ro'yxatini qaytaradi (haqiqiy bug,
+        tuzatilgan: avval frontend `getGroups`/`getTeachers` orqali butun tashkilot
+        ro'yxatini olardi, natijada bu jadvalga aloqasi yo'q guruhlar ham dropdown'da
+        ko'rinardi).
+        """
+        schedule = self.get_object()
+        groups = (
+            schedule.entries
+            .filter(group__isnull=False)
+            .values('group_id', 'group__name')
+            .distinct()
+            .order_by('group__name')
+        )
+        teachers = (
+            schedule.entries
+            .filter(teacher__isnull=False)
+            .values('teacher_id', 'teacher__user__first_name', 'teacher__user__last_name')
+            .distinct()
+        )
+        return Response({
+            'groups': [
+                {'id': g['group_id'], 'name': g['group__name']} for g in groups
+            ],
+            'teachers': [
+                {
+                    'id': t['teacher_id'],
+                    # `full_name` — frontenddagi `getTeacherName()` shu maydonni kutadi
+                    'full_name': f"{t['teacher__user__first_name']} {t['teacher__user__last_name']}".strip(),
+                }
+                for t in teachers
+            ],
+        })
+
 
 class ScheduleEntryViewSet(viewsets.ModelViewSet):
     """
