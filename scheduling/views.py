@@ -299,7 +299,13 @@ class TeacherPagination(PageNumberPagination):
 
 class TeacherViewSet(viewsets.ModelViewSet):
     serializer_class = TeacherSerializer
-    permission_classes = [IsDeptManager]
+    # O'qituvchilar ro'yxati (o'qish) bir nechta sahifada dropdown/filtr sifatida
+    # kerak (SchedulePage.jsx, LoadSheetPage.jsx, TeacherSubjectAssignPage.jsx) —
+    # `edu_admin` ham shulardan foydalanadi (`/schedules` route'i unga ochiq),
+    # lekin avvalgi `IsDeptManager` faqat super_admin/org_admin/dept_manager'ga
+    # ruxsat berardi, natijada edu_admin doim 403 olardi (haqiqiy bug, tuzatilgan).
+    # Yozish (yaratish/o'chirish) hamon faqat dept_manager+ bilan cheklangan.
+    permission_classes = [IsDeptManagerOrReadOnly]
     pagination_class = TeacherPagination
 
     def get_queryset(self):
