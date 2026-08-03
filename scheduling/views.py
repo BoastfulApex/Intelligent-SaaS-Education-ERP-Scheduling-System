@@ -10,11 +10,14 @@ from django.http import HttpResponse
 import calendar
 import datetime
 import io
+import logging
 import re
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import pandas as pd
 from permissions import IsDeptManager, IsEduAdmin, IsOrgAdmin, IsDeptManagerOrReadOnly
+
+logger = logging.getLogger(__name__)
 
 from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
@@ -754,39 +757,52 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        with transaction.atomic():
-            schedule, created = Schedule.objects.get_or_create(
-                organization=org,
-                month=month,
-                year=year,
-                defaults={
-                    'title':        title,
-                    'date_from':    date_from,
-                    'date_to':      date_to,
-                    'generated_by': request.user,
-                }
+        try:
+            with transaction.atomic():
+                schedule, created = Schedule.objects.get_or_create(
+                    organization=org,
+                    month=month,
+                    year=year,
+                    defaults={
+                        'title':        title,
+                        'date_from':    date_from,
+                        'date_to':      date_to,
+                        'generated_by': request.user,
+                    }
+                )
+                if not created:
+                    # Qayta generatsiya — avvalgi yozuvlar o'chiriladi
+                    schedule.entries.all().delete()
+                    schedule.status = Schedule.Status.DRAFT
+                    schedule.save()
+
+                # OR-Tools solver
+                result = generate_schedule(
+                    schedule=schedule,
+                    organization=org,
+                    month=month,
+                    year=year,
+                    time_limit_seconds=time_limit,
+                )
+
+                entries  = result['entries']
+                stats    = result['stats']
+                warnings = result['warnings']
+
+                if entries:
+                    ScheduleEntry.objects.bulk_create(entries)
+        except Exception as e:
+            # Kutilmagan xatoni (masalan solver ichidagi biror istisno) Django'ning
+            # standart 500 HTML sahifasi o'rniga o'qiladigan JSON sifatida qaytaradi —
+            # aks holda frontend Network'da "500, bo'sh javob" ko'radi va sababni
+            # aniqlash imkonsiz bo'lib qoladi. To'liq xato serverning log fayliga
+            # yoziladi (traceback bilan), foydalanuvchiga faqat xabar ko'rsatiladi.
+            logger.exception("Jadval generatsiyasida kutilmagan xato (org=%s, %s/%s)",
+                              org.id if org else None, month, year)
+            return Response(
+                {'error': f'Jadval generatsiyasida kutilmagan xato yuz berdi: {e}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            if not created:
-                # Qayta generatsiya — avvalgi yozuvlar o'chiriladi
-                schedule.entries.all().delete()
-                schedule.status = Schedule.Status.DRAFT
-                schedule.save()
-
-            # OR-Tools solver
-            result = generate_schedule(
-                schedule=schedule,
-                organization=org,
-                month=month,
-                year=year,
-                time_limit_seconds=time_limit,
-            )
-
-            entries  = result['entries']
-            stats    = result['stats']
-            warnings = result['warnings']
-
-            if entries:
-                ScheduleEntry.objects.bulk_create(entries)
 
         response_data = {
             'schedule':  ScheduleSerializer(schedule).data,

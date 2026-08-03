@@ -297,14 +297,37 @@ def generate_schedule(
     tasks: list[Task] = []
     unassigned_count = 0
     month_end_day = calendar.monthrange(year, month)[1]
+    target_date = datetime.date(year, month, month_end_day)
+
+    # Bir xil yo'nalish (Major) + ta'lim turidagi guruhlar bir xil faol o'quv rejani
+    # ishlatadi (target_date barcha guruhlar uchun bir xil) — har bir guruh uchun
+    # qayta so'rov yubormaslik uchun (major_id, delivery_mode) bo'yicha keshlanadi.
+    # Ko'p guruhli tashkilotlarda bu N so'rovni bir nechta so'rovga tushiradi.
+    curriculum_cache: dict[tuple, object] = {}
+
+    def _get_curriculum(major, delivery_mode):
+        key = (major.id, delivery_mode)
+        if key not in curriculum_cache:
+            curriculum_cache[key] = Curriculum.get_active_for_date(
+                major, target_date=target_date, delivery_mode=delivery_mode,
+                queryset=Curriculum.objects.prefetch_related('blocks__subjects__subject'),
+            )
+        return curriculum_cache[key]
+
+    # Barcha guruhlar uchun GroupSubject'lar BITTA so'rovda olinadi (har guruh uchun
+    # alohida so'rov yubormaslik uchun) — (group_id, curriculum_subject_id) bo'yicha
+    # lug'atga yig'iladi.
+    gs_by_group_cs: dict[tuple, object] = {
+        (gs.group_id, gs.curriculum_subject_id): gs
+        for gs in GroupSubject.objects.filter(
+            group_id__in=[g.id for g in groups],
+            teacher__isnull=False,
+            is_vacant=False,
+        ).select_related('teacher')
+    }
 
     for group in groups:
-        curriculum = Curriculum.get_active_for_date(
-            group.major,
-            target_date=datetime.date(year, month, month_end_day),
-            delivery_mode=group.delivery_mode,
-            queryset=Curriculum.objects.prefetch_related('blocks__subjects__subject'),
-        )
+        curriculum = _get_curriculum(group.major, group.delivery_mode)
         if not curriculum:
             warnings.append(
                 f"Guruh #{group.id} ({group.name}) uchun faol o'quv reja topilmadi — "
@@ -345,19 +368,9 @@ def generate_schedule(
             )
             continue
 
-        gs_by_cs = {
-            gs.curriculum_subject_id: gs
-            for gs in GroupSubject.objects.filter(
-                group=group,
-                curriculum_subject__block__curriculum=curriculum,
-                teacher__isnull=False,
-                is_vacant=False,
-            ).select_related('teacher')
-        }
-
         for block in curriculum.blocks.all():
             for cs in block.subjects.select_related('subject').all():
-                gs = gs_by_cs.get(cs.id)
+                gs = gs_by_group_cs.get((group.id, cs.id))
                 if not gs:
                     unassigned_count += 1
                     continue
