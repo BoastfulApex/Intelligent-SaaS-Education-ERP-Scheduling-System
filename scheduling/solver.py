@@ -527,9 +527,23 @@ def generate_schedule(
         model.add(sum(vars_) <= required)
 
     # ── CONSTRAINT 2: O'qituvchi bir vaqtda faqat bir joyda ──────────────────
+    # **Muhim (haqiqiy bug, tuzatilgan)**: avval `si` (slot indeksi, `para_id`
+    # orqali) bo'yicha guruhlangan edi — lekin `para_id` faqat BITTA smenaga
+    # tegishli, turli guruhlar turli smenalarda bo'lishi mumkin. Agar ikkita
+    # turli smenaning paralari bir xil aniq vaqtga to'g'ri kelsa (masalan
+    # ikkalasida ham "1-para" 09:00-10:20), ular turli `para_id`ga ega bo'lgani
+    # uchun avvalgi kod ularni "boshqa-boshqa slot" deb hisoblab, BIR XIL
+    # o'qituvchini ikkala guruhga bir vaqtda qo'yib yuborishi mumkin edi
+    # (production'da haqiqatan sodir bo'lgan, tekshirilgan). Endi haqiqiy
+    # (sana, boshlanish vaqti, tugash vaqti) bo'yicha guruhlanadi — shunda
+    # turli smenalarning bir xil vaqtga to'g'ri keluvchi paralari ham to'g'ri
+    # to'qnashuv sifatida aniqlanadi.
     teacher_slot: defaultdict[tuple, list] = defaultdict(list)
     for (ti, si), var in x.items():
-        teacher_slot[(tasks[ti].teacher_id, si)].append(var)
+        slot = slots[si]
+        para = para_by_id[slot.para_id]
+        time_key = (slot.date, para.start_time, para.end_time)
+        teacher_slot[(tasks[ti].teacher_id, time_key)].append(var)
 
     for vars_ in teacher_slot.values():
         if len(vars_) > 1:

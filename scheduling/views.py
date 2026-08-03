@@ -860,6 +860,13 @@ class ScheduleViewSet(viewsets.ModelViewSet):
         ro'yxatini olardi, natijada bu jadvalga aloqasi yo'q guruhlar ham dropdown'da
         ko'rinardi).
         """
+        # MUHIM: ScheduleEntry.Meta.ordering = ['date', 'para__order'] — agar
+        # `.values().distinct()` zanjirida aniq `.order_by(...)` bo'lmasa, Django
+        # shu tartiblash maydonlarini so'rovga yashirincha qo'shib qo'yadi va
+        # DISTINCT haqiqiy dublikatlarni olib tashlay olmay qoladi (har bir
+        # sana/para juftligi "boshqacha qator" deb hisoblanadi). Shuning uchun
+        # ikkalasida ham aniq `.order_by(...)` bilan standart tartiblash
+        # bekor qilinadi (haqiqiy bug, tuzatilgan).
         schedule = self.get_object()
         groups = (
             schedule.entries
@@ -873,6 +880,7 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             .filter(teacher__isnull=False)
             .values('teacher_id', 'teacher__user__first_name', 'teacher__user__last_name')
             .distinct()
+            .order_by('teacher__user__first_name', 'teacher__user__last_name')
         )
         return Response({
             'groups': [
