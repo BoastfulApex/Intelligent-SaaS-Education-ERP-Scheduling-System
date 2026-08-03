@@ -105,7 +105,7 @@ def _entry_rows(date_entries: dict) -> list[tuple]:
             )
             module   = entry.subject.name if entry.subject else '—'
             ltype    = LESSON_TYPE_UZ.get(entry.lesson_type, entry.lesson_type)
-            teacher  = entry.teacher.user.get_full_name() if entry.teacher else '—'
+            teacher  = entry.teacher.user.get_full_name() if entry.teacher else 'Vakant'
             room     = 'Onlayn (Zoom)' if entry.is_online else (
                 entry.room.name if entry.room else (
                     entry.building.name if entry.building else '—'

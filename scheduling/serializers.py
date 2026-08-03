@@ -122,7 +122,10 @@ class TeacherMonthlyLoadSerializer(serializers.ModelSerializer):
 
 
 class ScheduleEntrySerializer(serializers.ModelSerializer):
-    teacher_name    = serializers.CharField(source='teacher.user.get_full_name', read_only=True)
+    # `teacher` bo'sh bo'lishi mumkin (vakant/o'qituvchisiz joylashtirilgan dars —
+    # scheduling-generation.md) — oddiy `CharField(source=...)` `teacher=None`
+    # bo'lganda `AttributeError` bilan qulardi, shuning uchun SerializerMethodField.
+    teacher_name    = serializers.SerializerMethodField()
     group_name      = serializers.CharField(source='group.name', read_only=True)
     subject_name    = serializers.CharField(source='subject.name', read_only=True)
     room_name       = serializers.CharField(source='room.name', read_only=True)
@@ -143,6 +146,9 @@ class ScheduleEntrySerializer(serializers.ModelSerializer):
                   'para', 'para_name', 'start_time', 'end_time',
                   'date', 'weekday_display', 'is_substituted']
         read_only_fields = ['id']
+
+    def get_teacher_name(self, obj):
+        return obj.teacher.user.get_full_name() if obj.teacher else 'Vakant'
 
     def get_weekday_display(self, obj):
         days = {

@@ -330,7 +330,14 @@ class ScheduleEntry(models.Model):
     Aniq sana va vaqt bilan.
     """
     schedule        = models.ForeignKey(Schedule, on_delete=models.CASCADE, related_name='entries')
-    teacher         = models.ForeignKey('scheduling.Teacher', on_delete=models.CASCADE, related_name='schedule_entries')
+    teacher         = models.ForeignKey(
+        'scheduling.Teacher',
+        on_delete=models.CASCADE,
+        related_name='schedule_entries',
+        null=True, blank=True,
+        verbose_name="O'qituvchi",
+        help_text="Bo'sh bo'lsa — fanga hali o'qituvchi biriktirilmagan/vakant (Vakant)"
+    )
     group           = models.ForeignKey('academic.Group', on_delete=models.CASCADE, related_name='schedule_entries')
     subject         = models.ForeignKey('academic.Subject', on_delete=models.CASCADE, related_name='schedule_entries')
     lesson_type     = models.CharField(

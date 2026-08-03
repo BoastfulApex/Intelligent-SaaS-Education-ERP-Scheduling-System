@@ -51,8 +51,8 @@ from .models import (
 @dataclass
 class Task:
     """Bitta GroupSubject (guruh+fan+o'qituvchi) yozuvidan yaratilgan vazifa."""
-    dist_id:    int          # GroupSubject.id (traceability uchun)
-    teacher_id: int
+    dist_id:    int          # GroupSubject.id (traceability uchun, vakant bo'lsa 0)
+    teacher_id: int | None   # None = vakant/o'qituvchi biriktirilmagan
     group_id:   int
     subject_id: int
     room_type:  str          # 'lecture' | 'practice' | 'field' | 'independent'
@@ -60,7 +60,9 @@ class Task:
     paras_needed: int        # hours // 2
     group_start: datetime.date   # guruhning shu oydagi haqiqiy boshlanish sanasi
     group_end:   datetime.date   # guruhning shu oydagi haqiqiy tugash sanasi
-    building_id:  int | None = None   # guruh biriktirilgan bino (onlaynda None)
+    # Bino task darajasida SAQLANMAYDI — guruh oy davomida turli binolarga
+    # biriktirilgan bo'lishi mumkin, shuning uchun bino har bir (vazifa, sana)
+    # juftligi uchun `day_map`dan alohida hisoblanadi (slot yaratish bosqichida).
     is_online:    bool = False        # Group.delivery_mode == 'online' — xona/bino kerak emas
     requires_computer_room: bool = False   # Subject.requires_computer_room (IT/AKT fani)
 
@@ -78,7 +80,7 @@ class Slot:
 
 @dataclass
 class ResolvedAssignment:
-    """Bir guruh uchun shu davrda vakillik qiluvchi smena/bino/onlayn holati."""
+    """Bitta (guruh, sana) juftligi uchun HAQIQIY smena/bino/onlayn holati."""
     shift_id:    int
     building_id: int | None
     is_online:   bool
@@ -138,11 +140,12 @@ def _teacher_busy_set(teacher_id: int,
     return busy
 
 
-def _resolve_group_assignments(organization,
-                               date_from: datetime.date,
-                               date_to: datetime.date) -> dict[int, ResolvedAssignment]:
+def _resolve_group_day_map(organization,
+                           date_from: datetime.date,
+                           date_to: datetime.date) -> dict[tuple, ResolvedAssignment]:
     """
-    Har bir guruh uchun berilgan davrdagi smena/bino/onlayn holatini aniqlaydi.
+    Har bir (guruh, sana) juftligi uchun HAQIQIY kunlik smena/bino/onlayn holatini
+    qaytaradi — `{(group_id, date): ResolvedAssignment}`.
 
     Manba — `GroupDayAssignment` ("Guruh biriktirish" kalendari, kunlik yozuvlar).
     Eski `academic.models.GroupAssignment` (oylik) endi ISHLATILMAYDI — hech qanday
@@ -150,10 +153,13 @@ def _resolve_group_assignments(organization,
     generatsiyasi undan foydalansa har doim "smena/bino biriktirilmagan" berib
     o'tkazib yuborardi.
 
-    Guruh uchun shu davrdagi ENG ERTA sanali yozuv vakillik qiladi — xuddi
-    `curriculum_preview`dagi (`scheduling/views.py`) `first_da` naqshi bilan bir xil,
-    shunda ikkala joy ham bir xil "oyning vakillik qiluvchi biriktiruvi" mantig'iga
-    tayanadi.
+    **Haqiqiy bug (tuzatilgan)**: avval bu funksiya guruh uchun shu davrdagi ENG
+    ERTA sanali yozuvni butun oy uchun "vakillik qiluvchi" sifatida ishlatardi.
+    Lekin production ma'lumotlarida (tekshirildi) bir guruh oy davomida haqiqatan
+    TURLI binolarga biriktirilgan bo'lishi mumkin (masalan birinchi hafta bir
+    binoda, keyingi haftalar boshqa binoda) — bunday holda boshqa kunlar uchun
+    noto'g'ri (birinchi kunning) bino ishlatilib qolardi. Endi har bir KUNNING
+    o'z haqiqiy smena/binosi alohida saqlanadi va shunga mos ishlatiladi.
 
     Guruh `delivery_mode='online'` bo'lsa — `building_id=None` bo'lishi kutiladi va
     `is_online=True` qaytariladi (bino talab qilinmaydi, faqat smena kerak).
@@ -162,23 +168,18 @@ def _resolve_group_assignments(organization,
         g.id: g for g in Group.objects.filter(organization=organization)
     }
 
-    first_by_group: dict[int, GroupDayAssignment] = {}
     day_assignments = (
         GroupDayAssignment.objects
         .filter(group__organization=organization, date__range=(date_from, date_to),
                 shift__isnull=False)
         .select_related('shift', 'building')
-        .order_by('date')
     )
-    for da in day_assignments:
-        if da.group_id not in first_by_group:
-            first_by_group[da.group_id] = da
 
-    result: dict[int, ResolvedAssignment] = {}
-    for group_id, da in first_by_group.items():
-        group = groups_by_id.get(group_id)
+    result: dict[tuple, ResolvedAssignment] = {}
+    for da in day_assignments:
+        group = groups_by_id.get(da.group_id)
         is_online = bool(group and group.delivery_mode == DeliveryMode.ONLINE)
-        result[group_id] = ResolvedAssignment(
+        result[(da.group_id, da.date)] = ResolvedAssignment(
             shift_id=da.shift_id,
             building_id=da.building_id,
             is_online=is_online,
@@ -290,8 +291,12 @@ def generate_schedule(
             'warnings': [f'{month}/{year} uchun guruh kunlik biriktiruvi topilmadi.'],
         }
 
-    # ── 4. GURUH → SMENA + BINO + PARALAR ────────────────────────────────────
-    assignments = _resolve_group_assignments(organization, date_from, date_to)
+    # ── 4. GURUH → KUNLIK SMENA + BINO + PARALAR ─────────────────────────────
+    # `{(group_id, date): ResolvedAssignment}` — har bir kunning o'z haqiqiy
+    # smena/binosi (guruh oy davomida turli binolarga biriktirilgan bo'lishi
+    # mumkin — haqiqiy bug, tuzatilgan, .claude/rules/schedule-generation.md).
+    day_map = _resolve_group_day_map(organization, date_from, date_to)
+    groups_with_da = {gid for (gid, _d) in day_map}
 
     # ── 5. VAZIFALAR (Task) YARATISH — GroupSubject (haqiqiy Taqsimot manbai) ──
     tasks: list[Task] = []
@@ -335,24 +340,10 @@ def generate_schedule(
             )
             continue
 
-        ga = assignments.get(group.id)
-        if ga is None:
+        if group.id not in groups_with_da:
             warnings.append(
                 f"Guruh #{group.id} uchun smena biriktirilmagan — o'tkazib yuborildi."
             )
-            continue
-
-        # Oflayn guruhga bino shart — onlaynga (Zoom) kerak emas
-        if not ga.is_online and ga.building_id is None:
-            warnings.append(
-                f"Guruh #{group.id} (oflayn) uchun bino biriktirilmagan — o'tkazib yuborildi."
-            )
-            continue
-
-        # Faqat shu smena paralarini ishlatamiz
-        shift_paras = [p for p in all_paras if p.shift_id == ga.shift_id]
-        if not shift_paras:
-            warnings.append(f"Smena #{ga.shift_id} uchun paralar yo'q.")
             continue
 
         # Guruhning shu oydagi o'z muddati — Schedule global davri bilan kesishmasi.
@@ -368,12 +359,30 @@ def generate_schedule(
             )
             continue
 
+        # `is_online` — Group.delivery_mode'dan, doim bir xil (kunlik biriktiruvdan
+        # farqli, guruh oy davomida onlayn/oflayn turini o'zgartirmaydi). Bino esa
+        # ENDI task darajasida emas, har bir (vazifa, sana) juftligi uchun
+        # `day_map`dan alohida hisoblanadi (pastda, 7-bo'lim) — chunki guruh oy
+        # davomida turli binolarga biriktirilgan bo'lishi mumkin.
+        is_online = group.delivery_mode == DeliveryMode.ONLINE
+
         for block in curriculum.blocks.all():
             for cs in block.subjects.select_related('subject').all():
                 gs = gs_by_group_cs.get((group.id, cs.id))
-                if not gs:
+                # Fanga o'qituvchi biriktirilmagan yoki vakant deb belgilangan bo'lsa
+                # ham — dars jadvaldan butunlay tashlab yuborilmaydi, balki
+                # `teacher_id=None` bilan joylashtiriladi (guruhning o'sha kuni
+                # bo'sh qolib ketmasligi uchun, "hali odam yo'q" holatini ko'rsatib
+                # turadi). O'qituvchi to'qnashuvi cheklovi (Constraint 2) bunday
+                # vazifalarga qo'llanilmaydi — chunki haqiqiy odam yo'q, bir-biriga
+                # zid kelmaydi (haqiqiy so'rov: .claude/rules/schedule-generation.md).
+                if gs:
+                    teacher_id = gs.teacher_id
+                    dist_id = gs.id
+                else:
+                    teacher_id = None
+                    dist_id = 0
                     unassigned_count += 1
-                    continue
 
                 hours = cs.auditorium_hours
                 if hours < 2:
@@ -390,8 +399,8 @@ def generate_schedule(
                 ]
 
                 tasks.append(Task(
-                    dist_id=gs.id,
-                    teacher_id=gs.teacher_id,
+                    dist_id=dist_id,
+                    teacher_id=teacher_id,
                     group_id=group.id,
                     subject_id=cs.subject_id,
                     room_type=lesson_type,
@@ -399,8 +408,7 @@ def generate_schedule(
                     paras_needed=hours // 2,
                     group_start=g_start,
                     group_end=g_end,
-                    building_id=ga.building_id,
-                    is_online=ga.is_online,
+                    is_online=is_online,
                     requires_computer_room=requires_computer_room,
                     week_hours=week_hours,
                 ))
@@ -408,7 +416,7 @@ def generate_schedule(
     if unassigned_count:
         warnings.append(
             f"Jami {unassigned_count} ta fanga o'qituvchi biriktirilmagan yoki vakant "
-            "deb belgilangan — jadvalga kiritilmadi."
+            "deb belgilangan — jadvalga \"Vakant\" sifatida (o'qituvchisiz) joylashtirildi."
         )
 
     if not tasks:
@@ -419,13 +427,16 @@ def generate_schedule(
         }
 
     # ── 6. SLOT YARATISH (sana × para) ───────────────────────────────────────
-    # Har guruh o'z smenasidagi paralardan foydalanadi
-    # Umumiy slot: barcha (sana, para_id) juftlar
+    # Har guruh HAR BIR KUNNING o'z haqiqiy smenasidagi paralaridan foydalanadi
+    # (`day_map` — guruh oy davomida turli smenaga o'tishi mumkin, garchi
+    # productionda odatda smena o'zgarmasa ham, bino ko'pincha o'zgaradi).
     all_slot_keys: set[tuple] = set()
     for t in tasks:
-        ga = assignments[t.group_id]
-        shift_para_ids = [p.id for p in all_paras if p.shift_id == ga.shift_id]
         for d in working_days:
+            da = day_map.get((t.group_id, d))
+            if da is None:
+                continue
+            shift_para_ids = [p.id for p in all_paras if p.shift_id == da.shift_id]
             for pid in shift_para_ids:
                 all_slot_keys.add((d, pid))
 
@@ -440,25 +451,40 @@ def generate_schedule(
     solver.parameters.num_search_workers  = 4
 
     # x[task_i, slot_j] = 1 → task_i slot_j da joylashtirildi
+    # `slot_building` — har bir haqiqatan yaratilgan (ti,si) uchun SHU KUNGA tegishli
+    # haqiqiy bino (guruh oy davomida turli binoda bo'lishi mumkin — 9-bo'limda
+    # ScheduleEntry yaratishda ishlatiladi, `task.building_id` o'rniga).
     x = {}
+    slot_building: dict[tuple, int | None] = {}
     for ti, task in enumerate(tasks):
-        ga = assignments[task.group_id]
-        shift_para_ids = {p.id for p in all_paras if p.shift_id == ga.shift_id}
-
-        busy = _teacher_busy_set(task.teacher_id, date_from, date_to, all_paras)
+        # Vakant/o'qituvchisiz vazifada haqiqiy o'qituvchi yo'q — band vaqt
+        # tekshiruvi qo'llanilmaydi (hech kim band bo'la olmaydi).
+        busy = (
+            _teacher_busy_set(task.teacher_id, date_from, date_to, all_paras)
+            if task.teacher_id is not None else set()
+        )
 
         for si, slot in enumerate(slots):
-            # Faqat o'qituvchi smenasidagi paralar
-            if slot.para_id not in shift_para_ids:
-                continue
             # Faqat guruhning O'Z muddati ichidagi kunlar (har guruh alohida
             # boshlanish/tugash sanasiga ega bo'lishi mumkin — Group.start_date/end_date)
             if slot.date < task.group_start or slot.date > task.group_end:
+                continue
+            # Shu KUNGA tegishli haqiqiy smena/bino (guruh boshqa kunlarda boshqa
+            # binoda bo'lishi mumkin — har bir sana alohida tekshiriladi)
+            da = day_map.get((task.group_id, slot.date))
+            if da is None:
+                continue
+            shift_para_ids = {p.id for p in all_paras if p.shift_id == da.shift_id}
+            if slot.para_id not in shift_para_ids:
+                continue
+            # Oflayn guruhga bino shart — onlaynga (Zoom) kerak emas
+            if not da.is_online and da.building_id is None:
                 continue
             # O'qituvchi band bo'lsa o'tkazib yuborish
             if (slot.date, slot.para_id) in busy:
                 continue
             x[ti, si] = model.new_bool_var(f'x_{ti}_{si}')
+            slot_building[ti, si] = da.building_id
 
     # ── HAFTALIK KVOTALARNI OLDINDAN HISOBLASH (Constraint 1 va 4 uchun) ──────
     # Har ikkala cheklov ham izchil bo'lishi SHART: agar Constraint 4 allaqachon
@@ -540,6 +566,11 @@ def generate_schedule(
     # to'qnashuv sifatida aniqlanadi.
     teacher_slot: defaultdict[tuple, list] = defaultdict(list)
     for (ti, si), var in x.items():
+        # Vakant/o'qituvchisiz vazifalarda haqiqiy odam yo'q — ular bir-biriga
+        # (yoki hech kimga) "to'qnashuv" hosil qilmaydi, shuning uchun bu
+        # cheklovga umuman kiritilmaydi.
+        if tasks[ti].teacher_id is None:
+            continue
         slot = slots[si]
         para = para_by_id[slot.para_id]
         time_key = (slot.date, para.start_time, para.end_time)
@@ -605,6 +636,10 @@ def generate_schedule(
 
         task = tasks[ti]
         slot = slots[si]
+        # Shu KUNGA tegishli haqiqiy bino (guruh oy davomida turli binoda
+        # bo'lishi mumkin — task darajasida emas, har bir joylashtirilgan
+        # (vazifa, sana) juftligi uchun alohida, haqiqiy bug tuzatilgan).
+        building_id = slot_building.get((ti, si))
 
         # Guruh talabalar soni
         group = Group.objects.filter(id=task.group_id).first()
@@ -614,7 +649,7 @@ def generate_schedule(
         room = None
         if not task.is_online:
             room = _select_room(
-                building_id=task.building_id,
+                building_id=building_id,
                 lesson_type=task.room_type,
                 min_capacity=capacity,
                 used_room_ids=used_rooms[(slot.date, slot.para_id)],
@@ -627,7 +662,7 @@ def generate_schedule(
                     no_computer_room_subjects.add(task.subject_id)
                     warnings.append(
                         f"Fan #{task.subject_id} kompyuter xonasini talab qiladi, lekin "
-                        f"bino #{task.building_id}da bo'sh kompyuter xonasi topilmadi — "
+                        f"bino #{building_id}da bo'sh kompyuter xonasi topilmadi — "
                         "boshqa xonaga joylashtirildi."
                     )
 
@@ -638,7 +673,7 @@ def generate_schedule(
             subject_id=task.subject_id or None,
             lesson_type=task.room_type,
             room=room,
-            building_id=task.building_id,
+            building_id=building_id,
             is_online=task.is_online,
             para_id=slot.para_id,
             date=slot.date,
