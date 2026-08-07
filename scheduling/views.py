@@ -27,6 +27,11 @@ from permissions import IsDeptManager, IsEduAdmin, IsOrgAdmin, IsDeptManagerOrRe
 
 logger = logging.getLogger(__name__)
 
+WEEKDAYS_UZ_SHORT = {
+    1: 'Dushanba', 2: 'Seshanba', 3: 'Chorshanba',
+    4: 'Payshanba', 5: 'Juma', 6: 'Shanba', 7: 'Yakshanba',
+}
+
 from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
                      Substitution, AuditLog,
@@ -1164,6 +1169,85 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             ],
             'rows':   rows,
             'totals': totals,
+        })
+
+    @action(detail=True, methods=['get'], url_path='daily-teacher-count',
+            permission_classes=[IsAuthenticated])
+    def daily_teacher_count(self, request, pk=None):
+        """
+        GET /schedules/{id}/daily-teacher-count/
+
+        Har bir SANA uchun, BINO KESIMIDA, o'sha kuni haqiqatan darsi bor
+        (band) o'qituvchilar soni — "Hisobotlar" bo'limi uchun, bir kunda
+        har bir binoda nechta o'qituvchi ishlashini ko'rish uchun so'ralgan.
+
+        Bitta o'qituvchi bir kunda ikki xil binoda bo'lolmaydi (Constraint 2b,
+        `schedule-generation.md`), shuning uchun kunlik "jami" — barcha
+        binolar bo'yicha oddiy yig'indi bilan bir xil (dublikat xavfi yo'q).
+        Onlayn (Zoom) darslar alohida `online` kaliti ostida hisoblanadi
+        (bino biriktirilmagan bo'lgani uchun `by_building` ichida emas).
+
+        `dept_manager` — `Teacher.department` orqali faqat o'z kafedrasi
+        o'qituvchilari bilan cheklanadi (`free-teachers`dagi bilan bir xil
+        naqsh, `roles-permissions.md`).
+
+        Javob:
+        {
+          "buildings": [{id, name, is_regional}],
+          "days": [{date, weekday_display, total, online,
+                     by_building: {building_id: count}}]
+        }
+        """
+        from collections import defaultdict
+        from organizations.models import Building
+
+        schedule = self.get_object()
+        entries = schedule.entries.filter(teacher__isnull=False)
+
+        if request.user.role == 'dept_manager':
+            dept = Department.objects.filter(
+                manager=request.user, organization=schedule.organization
+            ).first()
+            if dept:
+                entries = entries.filter(teacher__department=dept)
+
+        entries = entries.select_related('building')
+
+        # (date, building_id) -> {teacher_id}  — bino bo'sh bo'lsa (onlayn) None
+        per_day_building = defaultdict(set)
+        per_day_total = defaultdict(set)
+        used_building_ids = set()
+        for en in entries:
+            per_day_building[(en.date, en.building_id)].add(en.teacher_id)
+            per_day_total[en.date].add(en.teacher_id)
+            if en.building_id:
+                used_building_ids.add(en.building_id)
+
+        buildings = list(
+            Building.objects.filter(id__in=used_building_ids)
+            .order_by('name').values('id', 'name', 'is_regional')
+        )
+
+        days = []
+        for d in sorted(per_day_total):
+            by_building = {}
+            online_count = 0
+            for b in buildings:
+                cnt = len(per_day_building.get((d, b['id']), ()))
+                if cnt:
+                    by_building[b['id']] = cnt
+            online_count = len(per_day_building.get((d, None), ()))
+            days.append({
+                'date': d,
+                'weekday_display': WEEKDAYS_UZ_SHORT.get(d.isoweekday(), ''),
+                'total': len(per_day_total[d]),
+                'online': online_count,
+                'by_building': by_building,
+            })
+
+        return Response({
+            'buildings': buildings,
+            'days': days,
         })
 
     @action(detail=True, methods=['get'], url_path='free-teachers',
