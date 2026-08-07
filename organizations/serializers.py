@@ -15,7 +15,7 @@ class BuildingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Building
         fields = ['id', 'organization', 'organization_name',
-                  'name', 'address', 'is_active']
+                  'name', 'address', 'is_active', 'is_regional']
         read_only_fields = ['id', 'organization']
         
        

@@ -21,6 +21,11 @@ class Building(models.Model):
     name         = models.CharField(max_length=255, verbose_name="Bino nomi")
     address      = models.TextField(blank=True)
     is_active    = models.BooleanField(default=True)
+    # Viloyatda joylashgan lokatsiya — o'qituvchilar bu yerga komandirovkaga yuboriladi.
+    # Jadval generatsiyasida shu binodagi darslar imkon qadar KAM o'qituvchi-kun bilan
+    # (har bir o'qituvchining darslari zich, ketma-ket kunlarga to'plangan holda)
+    # joylashtiriladi — bir vaqtda viloyatda minimal o'qituvchi bo'lishi uchun.
+    is_regional  = models.BooleanField(default=False, verbose_name="Viloyatda joylashgan")
 
     class Meta:
         db_table = 'buildings'

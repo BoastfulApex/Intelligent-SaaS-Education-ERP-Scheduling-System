@@ -314,6 +314,33 @@ class Schedule(models.Model):
     generated_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, related_name='generated_schedules')
     generated_at = models.DateTimeField(auto_now_add=True)
 
+    # ── GENERATSIYA JARAYONI (progress bar uchun) ────────────────────────────
+    # Jadval tuzish 4–5 daqiqa davom etadi, shuning uchun u fon oqimida
+    # (thread) bajariladi va holati shu maydonlarga yoziladi. Frontend
+    # `GET /schedules/{id}/progress/` orqali so'rab turadi — sahifa yopilib
+    # qayta ochilsa ham jarayon ko'rinib turadi.
+    class GenStatus(models.TextChoices):
+        IDLE    = 'idle',    'Boshlanmagan'
+        RUNNING = 'running', 'Tuzilmoqda'
+        DONE    = 'done',    'Tayyor'
+        FAILED  = 'failed',  'Xatolik'
+
+    gen_status   = models.CharField(max_length=20, choices=GenStatus.choices,
+                                    default=GenStatus.IDLE,
+                                    verbose_name="Generatsiya holati")
+    gen_percent  = models.PositiveSmallIntegerField(default=0,
+                                                    verbose_name="Bajarildi (%)")
+    gen_step     = models.CharField(max_length=255, blank=True, default='',
+                                    verbose_name="Joriy qadam")
+    gen_detail   = models.TextField(blank=True, default='',
+                                    verbose_name="Qadam izohi")
+    gen_started  = models.DateTimeField(null=True, blank=True,
+                                        verbose_name="Boshlangan vaqt")
+    gen_finished = models.DateTimeField(null=True, blank=True,
+                                        verbose_name="Tugagan vaqt")
+    gen_result   = models.JSONField(null=True, blank=True,
+                                    verbose_name="Natija (stats/warnings)")
+
     class Meta:
         db_table = 'schedules'
         verbose_name = "Jadval"

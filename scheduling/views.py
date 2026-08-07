@@ -1,6 +1,14 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+import threading
+from django.db import connection as db_connection
+from django.utils import timezone
+
+# Jadval tuzish odatda 4-6 daqiqa. Shundan ancha ko'p `running` holatda turgan
+# jarayon - o'lib ketgan oqim (server qayta ishga tushgan va h.k.). Uni xato
+# deb belgilamasak, qayta generatsiya abadiy bloklanib qolardi (409).
+STALE_GEN_SECONDS = 1800
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.pagination import PageNumberPagination
@@ -720,7 +728,19 @@ class ScheduleViewSet(viewsets.ModelViewSet):
         year       = request.data.get('year')
         title      = request.data.get('title')
         org        = request.user.organization
-        time_limit = int(request.data.get('time_limit', 60))
+        # ── VAQT LIMITI: pastdan CHEKLANGAN ──────────────────────────────────
+        # **Haqiqiy muammo (o'lchangan)**: limit kichik bo'lsa jadval sifati
+        # keskin tushadi va buni foydalanuvchi sezmaydi — natija "shunchaki
+        # yomonroq" bo'lib chiqadi:
+        #   60s  → 1280/1283 joylashadi, 24 o'qituvchidan 16 tasida bo'sh kun
+        #   120s → 1282/1283, 18 tasida bo'sh kun
+        #   240s → 1283/1283, 0–2 tasida bo'sh kun
+        # Sabab: 1-bosqich (maksimal dars soni) o'zi 30–120 soniya talab
+        # qiladi; undan kam vaqtda viloyat ixchamligiga umuman navbat
+        # yetmaydi. Shuning uchun quyi chegara qat'iy qo'yilgan.
+        MIN_TIME_LIMIT = 240
+        requested_limit = int(request.data.get('time_limit', MIN_TIME_LIMIT))
+        time_limit = max(MIN_TIME_LIMIT, requested_limit)
 
         if not all([month, year, title]):
             return Response(
@@ -763,65 +783,168 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            with transaction.atomic():
-                schedule, created = Schedule.objects.get_or_create(
-                    organization=org,
-                    month=month,
-                    year=year,
-                    defaults={
-                        'title':        title,
-                        'date_from':    date_from,
-                        'date_to':      date_to,
-                        'generated_by': request.user,
-                    }
-                )
-                if not created:
-                    # Qayta generatsiya — avvalgi yozuvlar o'chiriladi
-                    schedule.entries.all().delete()
-                    schedule.status = Schedule.Status.DRAFT
-                    schedule.save()
+        # -- JADVALNI YARATISH/TOZALASH (tez, so'rov ichida) -----------------
+        with transaction.atomic():
+            schedule, created = Schedule.objects.get_or_create(
+                organization=org, month=month, year=year,
+                defaults={
+                    'title':        title,
+                    'date_from':    date_from,
+                    'date_to':      date_to,
+                    'generated_by': request.user,
+                }
+            )
+            # "Osilib qolgan" jarayon qayta generatsiyani abadiy bloklab
+            # qo'ymasligi uchun eskirganini tekshiramiz (server qayta ishga
+            # tushsa oqim o'ladi, holat esa `running` bo'lib qolaveradi).
+            if (schedule.gen_status == Schedule.GenStatus.RUNNING
+                    and schedule.gen_started
+                    and (timezone.now() - schedule.gen_started).total_seconds()
+                        > STALE_GEN_SECONDS):
+                schedule.gen_status = Schedule.GenStatus.FAILED
+                schedule.save(update_fields=['gen_status'])
 
-                # OR-Tools solver
+            if schedule.gen_status == Schedule.GenStatus.RUNNING:
+                return Response(
+                    {'error': 'Bu oy uchun jadval hozir tuzilmoqda. '
+                              'Jarayon tugashini kuting.',
+                     'schedule_id': schedule.id},
+                    status=status.HTTP_409_CONFLICT
+                )
+            if not created:
+                # Qayta generatsiya - avvalgi yozuvlar o'chiriladi
+                schedule.entries.all().delete()
+                schedule.status = Schedule.Status.DRAFT
+                schedule.title = title
+                schedule.date_from = date_from
+                schedule.date_to = date_to
+                schedule.generated_by = request.user
+            schedule.gen_status = Schedule.GenStatus.RUNNING
+            schedule.gen_percent = 0
+            schedule.gen_step = 'Jarayon boshlanmoqda'
+            schedule.gen_detail = ("Jadval tuzish boshlandi. Bu odatda 4-6 daqiqa "
+                                   "davom etadi - oynani yopib ketsangiz ham jarayon "
+                                   "davom etaveradi.")
+            schedule.gen_started = timezone.now()
+            schedule.gen_finished = None
+            schedule.gen_result = None
+            schedule.save()
+
+        # -- SOLVERNI FON OQIMIDA ISHGA TUSHIRISH ----------------------------
+        # **Nega thread**: jadval tuzish 4-6 daqiqa davom etadi. Sinxron
+        # so'rovda brauzer/proksi timeout bo'lib ketardi va foydalanuvchi
+        # jarayon qay bosqichda ekanini umuman ko'rmasdi. Celery kabi navbat
+        # tizimi loyihada yo'q (broker sozlanmagan), shuning uchun eng sodda
+        # yechim - alohida oqim + holatni bazaga yozish. Frontend
+        # `GET /schedules/{id}/progress/` orqali so'rab turadi, shuning uchun
+        # sahifa yopilib qayta ochilsa ham jarayon ko'rinib turadi.
+        sch_id = schedule.id
+        org_id = org.id
+
+        def _run():
+            from organizations.models import Organization as _Org
+            try:
+                sch = Schedule.objects.get(pk=sch_id)
+                _org = _Org.objects.get(pk=org_id)
+
+                def _cb(pct, step, detail=''):
+                    Schedule.objects.filter(pk=sch_id).update(
+                        gen_percent=pct, gen_step=step, gen_detail=detail)
+
                 result = generate_schedule(
-                    schedule=schedule,
-                    organization=org,
-                    month=month,
-                    year=year,
-                    time_limit_seconds=time_limit,
+                    schedule=sch, organization=_org, month=month, year=year,
+                    time_limit_seconds=time_limit, progress_cb=_cb,
                 )
-
                 entries  = result['entries']
                 stats    = result['stats']
                 warnings = result['warnings']
+                if requested_limit < MIN_TIME_LIMIT:
+                    warnings.insert(0, (
+                        f"Vaqt limiti {requested_limit}s juda kichik edi - "
+                        f"{MIN_TIME_LIMIT}s ga oshirildi. Kichik limitda darslar "
+                        "to'liq joylashmaydi va o'qituvchilarda bo'sh kunlar "
+                        "paydo bo'ladi."
+                    ))
+                with transaction.atomic():
+                    if entries:
+                        ScheduleEntry.objects.bulk_create(entries)
+                    Schedule.objects.filter(pk=sch_id).update(
+                        gen_status=Schedule.GenStatus.DONE,
+                        gen_percent=100,
+                        gen_step='Jadval tayyor',
+                        gen_detail=(
+                            f"{stats.get('placed_paras', 0)} ta dars "
+                            f"{stats.get('total_paras', 0)} tadan joylashtirildi."),
+                        gen_finished=timezone.now(),
+                        gen_result={'stats': stats, 'warnings': warnings,
+                                    'created': len(entries)},
+                    )
+            except Exception as e:
+                logger.exception("Jadval generatsiyasida kutilmagan xato "
+                                 "(schedule=%s, %s/%s)", sch_id, month, year)
+                Schedule.objects.filter(pk=sch_id).update(
+                    gen_status=Schedule.GenStatus.FAILED,
+                    gen_step='Xatolik yuz berdi',
+                    gen_detail=str(e),
+                    gen_finished=timezone.now(),
+                    gen_result={'error': str(e)},
+                )
+            finally:
+                # Oqim o'z DB ulanishini yopishi SHART - aks holda ulanishlar
+                # to'planib qoladi (Django har oqim uchun alohida ulanish ochadi).
+                db_connection.close()
 
-                if entries:
-                    ScheduleEntry.objects.bulk_create(entries)
-        except Exception as e:
-            # Kutilmagan xatoni (masalan solver ichidagi biror istisno) Django'ning
-            # standart 500 HTML sahifasi o'rniga o'qiladigan JSON sifatida qaytaradi —
-            # aks holda frontend Network'da "500, bo'sh javob" ko'radi va sababni
-            # aniqlash imkonsiz bo'lib qoladi. To'liq xato serverning log fayliga
-            # yoziladi (traceback bilan), foydalanuvchiga faqat xabar ko'rsatiladi.
-            logger.exception("Jadval generatsiyasida kutilmagan xato (org=%s, %s/%s)",
-                              org.id if org else None, month, year)
-            return Response(
-                {'error': f'Jadval generatsiyasida kutilmagan xato yuz berdi: {e}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        threading.Thread(target=_run, daemon=True,
+                         name=f'schedule-gen-{sch_id}').start()
 
-        response_data = {
-            'schedule':  ScheduleSerializer(schedule).data,
-            'stats':     stats,
-            'warnings':  warnings,
-            'created':   len(entries),
-        }
-
-        http_status = (
-            status.HTTP_201_CREATED if entries
-            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        return Response(
+            {'schedule': ScheduleSerializer(schedule).data,
+             'message': 'Jadval tuzish boshlandi.'},
+            status=status.HTTP_202_ACCEPTED
         )
-        return Response(response_data, status=http_status)
+
+    @action(detail=True, methods=['get'], url_path='progress',
+            permission_classes=[IsAuthenticated])
+    def progress(self, request, pk=None):
+        """
+        GET /api/v1/schedules/{id}/progress/
+
+        Generatsiya jarayonining joriy holati - progress bar uchun.
+        Sahifa yopilib qayta ochilsa ham shu endpoint orqali jarayon
+        ko'rinib turadi (holat bazada saqlanadi, xotirada emas).
+        """
+        sch = self.get_object()
+
+        # -- "Osilib qolgan" jarayonni aniqlash ------------------------------
+        # Server qayta ishga tushsa, oqim o'lib ketadi-yu, holat `running`
+        # bo'lib qolaveradi. Bir soatdan ko'p o'tgan bo'lsa - xato deb
+        # belgilanadi, aks holda progress bar abadiy aylanib turardi.
+        if (sch.gen_status == Schedule.GenStatus.RUNNING and sch.gen_started
+                and (timezone.now() - sch.gen_started).total_seconds()
+                    > STALE_GEN_SECONDS):
+            sch.gen_status = Schedule.GenStatus.FAILED
+            sch.gen_step = 'Jarayon uzilib qoldi'
+            sch.gen_detail = ("Server qayta ishga tushgan bo'lishi mumkin. "
+                              "Jadvalni qaytadan tuzing.")
+            sch.gen_finished = timezone.now()
+            sch.save()
+
+        elapsed = None
+        if sch.gen_started:
+            end = sch.gen_finished or timezone.now()
+            elapsed = int((end - sch.gen_started).total_seconds())
+
+        return Response({
+            'schedule_id': sch.id,
+            'title':       sch.title,
+            'status':      sch.gen_status,
+            'percent':     sch.gen_percent,
+            'step':        sch.gen_step,
+            'detail':      sch.gen_detail,
+            'elapsed_s':   elapsed,
+            'entries':     sch.entries.count(),
+            'result':      sch.gen_result,
+        })
 
     @action(detail=True, methods=['post'])
     def publish(self, request, pk=None):
@@ -894,6 +1017,297 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                 }
                 for t in teachers
             ],
+        })
+
+    @action(detail=True, methods=['get'], url_path='teacher-days',
+            permission_classes=[IsAuthenticated])
+    def teacher_days(self, request, pk=None):
+        """
+        GET /schedules/{id}/teacher-days/
+
+        Har bir o'qituvchi BINO KESIMIDA necha kun dars berishini qaytaradi.
+
+        Nima uchun kerak: viloyat binolariga o'qituvchilar komandirovkaga
+        boradi, shuning uchun "kim qayerda necha kun turadi" — rejalashtirish
+        va xarajat uchun asosiy ko'rsatkich. `days` (kun soni) — asosiy raqam;
+        `span` (birinchi–oxirgi kun oralig'i) va `gap_days` (safar ichidagi
+        BO'SH kunlar) safar naqadar ixcham ekanini ko'rsatadi.
+
+        Javob:
+        {
+          "buildings": [{id, name, is_regional}],
+          "rows": [{teacher_id, teacher_name, building_id, building_name,
+                    is_regional, days, lessons, first_date, last_date,
+                    span, gap_days}],
+          "totals": [{teacher_id, teacher_name, days, lessons, buildings}]
+        }
+        """
+        from collections import defaultdict
+        from organizations.models import Building
+
+        schedule = self.get_object()
+        entries = (
+            schedule.entries
+            .filter(teacher__isnull=False)
+            .select_related('teacher__user', 'building')
+        )
+
+        # (teacher_id, building_id) -> {sanalar}
+        per = defaultdict(set)
+        lessons = defaultdict(int)
+        names = {}
+        bnames = {}
+        per_teacher_days = defaultdict(set)
+        for en in entries:
+            key = (en.teacher_id, en.building_id)
+            per[key].add(en.date)
+            lessons[key] += 1
+            per_teacher_days[en.teacher_id].add(en.date)
+            if en.teacher_id not in names:
+                u = en.teacher.user
+                names[en.teacher_id] = (u.get_full_name() or u.username).strip()
+            if en.building_id and en.building_id not in bnames:
+                bnames[en.building_id] = en.building.name
+
+        regional = set(
+            Building.objects
+            .filter(organization=schedule.organization, is_regional=True)
+            .values_list('id', flat=True)
+        )
+
+        # -- ISH KUNLARI INDEKSI (haqiqiy bug, tuzatilgan) -------------------
+        # Avval `span` KALENDAR kunlari bo'yicha hisoblanardi:
+        #     span = (oxirgi_sana - birinchi_sana).days + 1
+        # Natijada orada qolgan YAKSHANBA ham "bo'sh kun" bo'lib sanalardi.
+        # Real misol: 24 o'qituvchidan 11 tasida "1 kun bo'sh" ko'rinardi,
+        # aslida hammasi ketma-ket ishlagan - o'sha 1 kun dam olish kuni edi.
+        # Solver esa bo'shliqni ISH KUNLARI bo'yicha o'lchaydi, ya'ni hisobot
+        # solver optimallashtirayotgan narsadan boshqa raqam ko'rsatardi.
+        # Endi indeks jadvalda dars bor kunlar bo'yicha quriladi - hisobot
+        # solver bilan bir xil narsani ko'rsatadi.
+        work_days = sorted({en.date for en in entries})
+        day_ix = {d: i for i, d in enumerate(work_days)}
+
+        rows = []
+        for (t_id, b_id), dates in per.items():
+            ds = sorted(dates)
+            span = (day_ix[ds[-1]] - day_ix[ds[0]] + 1) if ds else 0
+            rows.append({
+                'teacher_id':    t_id,
+                'teacher_name':  names.get(t_id, ''),
+                'building_id':   b_id,
+                'building_name': bnames.get(b_id) or 'Onlayn (Zoom)',
+                'is_regional':   b_id in regional,
+                'days':          len(ds),
+                'lessons':       lessons[(t_id, b_id)],
+                'first_date':    ds[0] if ds else None,
+                'last_date':     ds[-1] if ds else None,
+                'span':          span,
+                # Safar ichidagi bo'sh kunlar — ISH KUNLARI bo'yicha
+                # (yakshanba va dars umuman bo'lmagan kunlar hisobga olinmaydi)
+                'gap_days':      max(0, span - len(ds)),
+            })
+        rows.sort(key=lambda r: (-r['is_regional'], -r['days'], r['teacher_name']))
+
+        totals = [
+            {
+                'teacher_id':   t_id,
+                'teacher_name': names.get(t_id, ''),
+                'days':         len(dates),
+                'lessons':      sum(v for (tt, _b), v in lessons.items() if tt == t_id),
+                'buildings':    sum(1 for (tt, _b) in per if tt == t_id),
+            }
+            for t_id, dates in per_teacher_days.items()
+        ]
+        totals.sort(key=lambda r: (-r['days'], r['teacher_name']))
+
+        used_b = {r['building_id'] for r in rows if r['building_id']}
+        return Response({
+            'buildings': [
+                {'id': b.id, 'name': b.name, 'is_regional': b.is_regional}
+                for b in Building.objects.filter(id__in=used_b).order_by('name')
+            ],
+            'rows':   rows,
+            'totals': totals,
+        })
+
+    @action(detail=True, methods=['get'], url_path='free-teachers',
+            permission_classes=[IsAuthenticated])
+    def free_teachers(self, request, pk=None):
+        """
+        GET /schedules/{id}/free-teachers/?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+
+        Berilgan sana oralig'ida (odatda bitta hafta) har bir kun va har bir
+        PARA (aniq vaqt uyachasi) uchun BO'SH o'qituvchilar ro'yxati — guruh
+        yoki bino tanlanmaydi, butun tashkilot bo'yicha.
+
+        **Muhim**: paralar `Para.id` bo'yicha emas, HAQIQIY VAQT (start_time,
+        end_time) bo'yicha guruhlanadi — turli smenalarning bir xil vaqtga
+        to'g'ri keluvchi paralari (masalan ikkita "1-para" 09:00-10:20) bitta
+        ustunga birlashadi. Bu aynan solver.py Constraint 2'dagi bilan bir xil
+        mantiq (`.claude/rules/schedule-generation.md`) — aks holda bir xil
+        vaqt ikki marta ko'rsatilib, chalkashlik keltirib chiqarardi.
+
+        "Bo'sh" — shu jadvalda o'sha (sana, vaqt) da darsi yo'q VA
+        `TeacherBusyTime` orqali band deb belgilanmagan o'qituvchi.
+
+        Har bir o'qituvchi KAFEDRASI (`Teacher.department`) bilan birga
+        qaytariladi va natija shu bo'yicha guruhlangan holda chiqadi
+        (`slot.departments`) — kafedra mudiri faqat o'z kafedrasini,
+        edu_admin/org_admin esa barcha kafedralarni kafedra kesimida ko'radi.
+
+        Qo'shimcha `?department=<id>` bilan aniq bitta kafedraga filtrlash
+        mumkin. `dept_manager` uchun bu avtomatik qo'llanadi — boshqa
+        rollar `roles-permissions.md` dagi bir xil naqsh: `Teacher.department`
+        FK orqali scoping (avval `Teacher.subjects` orqali bilvosita scoping
+        qilingan va real ma'lumotda umuman ishlamagan edi).
+        """
+        from collections import defaultdict
+
+        schedule = self.get_object()
+        org = schedule.organization
+
+        date_from_str = request.query_params.get('date_from')
+        date_to_str   = request.query_params.get('date_to')
+        if not date_from_str or not date_to_str:
+            return Response(
+                {'error': 'date_from va date_to majburiy (YYYY-MM-DD)'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        date_from = datetime.date.fromisoformat(date_from_str)
+        date_to   = datetime.date.fromisoformat(date_to_str)
+
+        # Ish kunlari — Yakshanba dars yo'q (solver.py bilan bir xil qoida)
+        working_days = []
+        d = date_from
+        while d <= date_to:
+            if d.isoweekday() <= 6:
+                working_days.append(d)
+            d += datetime.timedelta(days=1)
+
+        # Distinct vaqt uyachalari — barcha smenalarning barcha paralari
+        # o'rtasidan, boshlanish vaqti bo'yicha tartiblanib, bir xil vaqtlar
+        # bitta ustunga birlashtiriladi
+        all_paras = (
+            Para.objects.filter(shift__organization=org, is_active=True)
+            .order_by('start_time')
+        )
+        slots, seen = [], set()
+        for p in all_paras:
+            key = (p.start_time, p.end_time)
+            if key in seen:
+                continue
+            seen.add(key)
+            slots.append(p)   # vakillik qiluvchi Para — is_conflict() uchun yetarli
+
+        teachers_qs = (
+            Teacher.objects.filter(organization=org, is_active=True)
+            .select_related('user', 'department')
+        )
+
+        # `dept_manager` avtomatik faqat o'z kafedrasini ko'radi — boshqa
+        # ViewSet'lardagi bir xil naqsh (`TeacherViewSet.get_queryset`,
+        # roles-permissions.md). Shu bilan birga filtr Select'i uchun
+        # qaytariladigan `departments_out` ham SHU kafedra bilan cheklanadi —
+        # aks holda dept_manager javobda boshqa kafedralarni ham ko'rardi,
+        # garchi tanlash imkoni bo'lmasa ham (chalkashtiruvchi).
+        user = request.user
+        if user.role == 'dept_manager':
+            dept = Department.objects.filter(
+                manager=user, organization=org
+            ).first()
+            if dept:
+                teachers_qs = teachers_qs.filter(department=dept)
+                departments_out = [{'id': dept.id, 'name': dept.name}]
+            else:
+                departments_out = list(
+                    Department.objects.filter(organization=org)
+                    .order_by('order', 'name').values('id', 'name')
+                )
+        else:
+            # Kafedralar ro'yxati (filtr Select'i uchun) — shu tashkilotdagi
+            # BARCHA kafedralar, teacher_data'dagi haqiqatan mavjud
+            # bo'lganlari emas (aks holda kafedra tanlangach ro'yxat bo'sh
+            # chiqib qolardi)
+            departments_out = list(
+                Department.objects.filter(organization=org)
+                .order_by('order', 'name').values('id', 'name')
+            )
+            if dept_param := request.query_params.get('department'):
+                teachers_qs = teachers_qs.filter(department_id=dept_param)
+
+        teachers = list(teachers_qs)
+        teacher_data = [
+            {
+                'id': t.id,
+                'full_name': (t.user.get_full_name() or t.user.username).strip()
+                             if t.user else f'#{t.id}',
+                'department_id':   t.department_id,
+                'department_name': t.department.name if t.department else "Kafedrasiz",
+            }
+            for t in teachers
+        ]
+
+        # (sana, start_time, end_time) -> band o'qituvchi id'lar (shu jadvalda)
+        busy_by_slot = defaultdict(set)
+        for e in (
+            ScheduleEntry.objects
+            .filter(schedule=schedule, date__range=(date_from, date_to),
+                     teacher__isnull=False)
+            .select_related('para')
+        ):
+            busy_by_slot[(e.date, e.para.start_time, e.para.end_time)].add(e.teacher_id)
+
+        # TeacherBusyTime — shu davr uchun bitta so'rovda
+        busy_times = list(
+            TeacherBusyTime.objects.filter(
+                teacher__organization=org, date__range=(date_from, date_to),
+            )
+        )
+
+        days_out = []
+        for day in working_days:
+            slot_out = []
+            for idx, slot in enumerate(slots):
+                busy_ids = set(busy_by_slot.get((day, slot.start_time, slot.end_time), ()))
+                for bt in busy_times:
+                    if bt.is_conflict(day, slot):
+                        busy_ids.add(bt.teacher_id)
+                free = [t for t in teacher_data if t['id'] not in busy_ids]
+
+                # Kafedra bo'yicha guruhlash — `Department.order` tartibida,
+                # so'ng "Kafedrasiz" (department=null) eng oxirida
+                by_dept = defaultdict(list)
+                for t in free:
+                    by_dept[(t['department_id'], t['department_name'])].append(t)
+                dept_order = {d['id']: i for i, d in enumerate(departments_out)}
+                dept_out = [
+                    {
+                        'department_id':   dept_id,
+                        'department_name': dept_name,
+                        'free_count':      len(dept_teachers),
+                        'teachers':        dept_teachers,
+                    }
+                    for (dept_id, dept_name), dept_teachers in sorted(
+                        by_dept.items(),
+                        key=lambda kv: (dept_order.get(kv[0][0], 999), kv[0][1]),
+                    )
+                ]
+
+                slot_out.append({
+                    'label':      f'{idx + 1}-para',
+                    'start_time': slot.start_time,
+                    'end_time':   slot.end_time,
+                    'free_count': len(free),
+                    'departments': dept_out,
+                })
+            days_out.append({'date': day, 'slots': slot_out})
+
+        return Response({
+            'slot_count': len(slots),
+            'total_teachers': len(teacher_data),
+            'departments': departments_out,
+            'days': days_out,
         })
 
 

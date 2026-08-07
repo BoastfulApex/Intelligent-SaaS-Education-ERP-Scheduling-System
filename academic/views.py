@@ -741,6 +741,20 @@ class CurriculumSubjectViewSet(viewsets.ModelViewSet):
                     continue
 
                 if dept_id:
+                    # **Qoida**: faqat MUSTAQIL tayyorgarlik soatidan iborat fanga
+                    # (auditoriya soati 0 — masalan "Yakuniy test sinovlari")
+                    # kafedra biriktirilmaydi. Bunday fan uchun o'qituvchi ham,
+                    # dars ham talab qilinmaydi — jadval generatsiyasi uni
+                    # umuman vazifaga aylantirmaydi (`hours < 2` sharti).
+                    # Kafedra biriktirilsa, u Taqsimot sahifasida bekorga
+                    # "o'qituvchi kutayotgan fan" bo'lib ko'rinardi.
+                    if cs.auditorium_hours == 0:
+                        errors.append({
+                            'subject_id': subj_id,
+                            'error': "Faqat mustaqil tayyorgarlik fani — kafedra "
+                                     "biriktirilmaydi",
+                        })
+                        continue
                     dept = Department.objects.filter(id=dept_id, organization=org).first()
                     if not dept:
                         errors.append({'subject_id': subj_id, 'error': 'Kafedra topilmadi'})

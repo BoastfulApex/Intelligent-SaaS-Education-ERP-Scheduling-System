@@ -170,8 +170,13 @@ class ScheduleSerializer(serializers.ModelSerializer):
         model = Schedule
         fields = ['id', 'organization', 'title', 'month', 'year',
                   'date_from', 'date_to', 'status', 'status_display',
-                  'generated_by', 'generated_at', 'total_entries', 'entries']
-        read_only_fields = ['id', 'generated_at']
+                  'generated_by', 'generated_at', 'total_entries', 'entries',
+                  # Generatsiya jarayoni (progress bar uchun) — ro'yxat
+                  # sahifasi shu maydonlarga qarab "Tuzilmoqda" holatini
+                  # ko'rsatadi va progress oynasini ochish tugmasini beradi
+                  'gen_status', 'gen_percent', 'gen_step']
+        read_only_fields = ['id', 'generated_at', 'gen_status', 'gen_percent',
+                            'gen_step']
 
     def get_total_entries(self, obj):
         return obj.entries.count()

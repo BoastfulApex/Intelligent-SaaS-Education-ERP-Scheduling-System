@@ -133,6 +133,68 @@ def _thin_border():
     return Border(left=s, right=s, top=s, bottom=s)
 
 
+#: Excel sheet nomida TAQIQLANGAN belgilar (fayl buziladi)
+_SHEET_BAD_CHARS = r'\/*?:[]'
+
+
+def _safe_sheet_name(name: str, used: set) -> str:
+    """
+    Excel uchun xavfsiz va TAKRORLANMAYDIGAN sheet nomi.
+
+    **Haqiqiy bug (tuzatilgan)**: avval shunchaki `group.name[:31]` ishlatilardi.
+    Excel'da sheet nomi 31 belgidan oshmasligi kerak — lekin real ma'lumotda
+    qisqartirilgandan keyin nomlar TAKRORLANIB qolardi (masalan uchta guruh
+    ham "Sport turlari bo'yicha yo'riqch" bo'lib chiqardi), bundan tashqari
+    ikkita boshqa guruh aynan bir xil to'liq nomga ega edi ("Futbol-1").
+    openpyxl takrorlangan nomni bloklamaydi — natijada BUZUQ .xlsx hosil
+    bo'lardi va Excel uni ochishda "ta'mirlab", sheetni `Recovered_Sheet1`
+    deb nomlab, bitta guruhning jadvalini butunlay yo'qotardi.
+
+    Shuning uchun bu yerda uch narsa ta'minlanadi:
+      1. taqiqlangan belgilar (`\\ / * ? : [ ]`) olib tashlanadi
+      2. chekkadagi apostrof/bo'shliq kesiladi (Excel ularni ham qabul qilmaydi)
+      3. nom takrorlansa oxiriga ` (2)`, ` (3)`... qo'shiladi — umumiy uzunlik
+         31 belgidan oshmaydigan qilib
+    """
+    clean = ''.join('-' if ch in _SHEET_BAD_CHARS else ch for ch in (name or ''))
+    clean = clean.strip().strip("'").strip()
+    if not clean:
+        clean = 'Guruh'
+
+    def _shorten(text: str, limit: int) -> str:
+        """Uzun nomni qisqartiradi, lekin OXIRINI saqlab qoladi.
+
+        **Nega o'rtadan qisqartiriladi (haqiqiy kamchilik)**: oddiy `text[:31]`
+        guruhni ajratib turadigan qismni kesib tashlardi — real ma'lumotda
+        "Sport turlari bo'yicha yo'riqchi-uslubchilar-**1**" va "...-**2**"
+        ikkalasi ham "Sport turlari bo'yicha yo'riqch" bo'lib qolar, farqlovchi
+        raqam yo'qolardi. Foydalanuvchi qaysi sheet qaysi guruh ekanini
+        ajrata olmasdi (nomlar unikal edi — ` (2)` qo'shilardi — lekin bu
+        guruh nomiga aloqasiz tartib raqami edi).
+        Endi nomning boshi ham, oxiri ham saqlanadi: `bosh..oxir`.
+        """
+        if len(text) <= limit:
+            return text
+        tail = 4
+        head = limit - tail - 2
+        return text[:head].rstrip() + '..' + text[-tail:]
+
+    candidate = _shorten(clean, 31)
+    if candidate not in used:
+        used.add(candidate)
+        return candidate
+    for i in range(2, 1000):
+        suffix = f' ({i})'
+        candidate = _shorten(clean, 31 - len(suffix)) + suffix
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+    # Amalda bu yerga yetib kelmaydi (1000 ta bir xil nomli guruh)
+    candidate = clean[:27] + str(len(used))
+    used.add(candidate)
+    return candidate
+
+
 def _make_excel(schedule: Schedule, group_entries: dict) -> bytes:
     wb = Workbook()
     wb.remove(wb.active)          # bo'sh default sheetni o'chirish
@@ -152,10 +214,10 @@ def _make_excel(schedule: Schedule, group_entries: dict) -> bytes:
                     'Vaqt', 'Modul nomi', 'Dars turi',
                     "O'qituvchi F.I.Sh.", 'Xona']
 
+    used_sheet_names: set = set()
     for group, date_dict in sorted(group_entries.items(), key=lambda x: x[0].name):
-        # Sheet nomi (Excel 31 belgidan uzun bo'lmaydi)
-        sh_name = group.name[:31]
-        ws = wb.create_sheet(title=sh_name)
+        # Sheet nomi — xavfsiz va takrorlanmaydigan (`_safe_sheet_name` izohiga qarang)
+        ws = wb.create_sheet(title=_safe_sheet_name(group.name, used_sheet_names))
 
         # ── 1. TASDIQLASH sarlavhasi ──────────────────────────────────────────
         ws.merge_cells('F1:H1')
