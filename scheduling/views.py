@@ -706,6 +706,17 @@ class ScheduleViewSet(viewsets.ModelViewSet):
     serializer_class = ScheduleSerializer
     permission_classes = [IsEduAdmin]
 
+    def get_permissions(self):
+        # list/retrieve — kafedra mudiri ham "Ko'rish" sahifasida jadvalni
+        # (hatto hali `draft` holatida, nashr etilmagan bo'lsa ham) ko'ra olishi
+        # kerak — boshqa detail action'lar (by-group/filters/teacher-days/
+        # free-teachers) allaqachon shu ViewSet ichida IsAuthenticated bilan
+        # ochiq edi, faqat asosiy list/retrieve IsEduAdmin bilan cheklangan edi.
+        # Yaratish/generatsiya/nashr/o'chirish hamon faqat IsEduAdmin+.
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsEduAdmin()]
+
     def get_queryset(self):
         return Schedule.objects.filter(
             organization=self.request.user.organization
