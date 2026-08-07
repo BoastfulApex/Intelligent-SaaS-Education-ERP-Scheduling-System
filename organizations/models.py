@@ -84,3 +84,28 @@ class Department(models.Model):
 
     def __str__(self):
         return f"{self.order}-blok: {self.name}"
+
+
+class Position(models.Model):
+    """
+    Lavozim (masalan "Professor", "Dotsent", "Katta o'qituvchi") — ro'yxatni
+    faqat org_admin(+) boshqaradi, kafedra mudiri esa o'qituvchi profilida
+    shu ro'yxatdan tanlaydi (`Teacher.position`). `TeacherLoad.position`dan
+    (Excel taqsimot yuklashda erkin matn ustuni) farqli — bu aniq, tashkilot
+    darajasida boshqariladigan ro'yxat.
+    """
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='positions'
+    )
+    name      = models.CharField(max_length=100, verbose_name="Lavozim nomi")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'positions'
+        verbose_name = "Lavozim"
+        verbose_name_plural = "Lavozimlar"
+        ordering = ['name']
+        unique_together = ['organization', 'name']
+
+    def __str__(self):
+        return self.name

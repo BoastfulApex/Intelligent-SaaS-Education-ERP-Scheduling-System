@@ -8,6 +8,7 @@ from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
 class TeacherSerializer(serializers.ModelSerializer):
     full_name       = serializers.CharField(source='user.get_full_name', read_only=True)
     department_name = serializers.CharField(source='department.name', read_only=True)
+    position_name   = serializers.CharField(source='position.name', read_only=True)
     # Fan biriktirish sanoqlari (get_queryset da annotate qilinadi; create/update
     # dan keyin annotatsiya bo'lmasligi mumkin — shuning uchun getattr fallback)
     assigned_major_count   = serializers.SerializerMethodField()
@@ -16,7 +17,8 @@ class TeacherSerializer(serializers.ModelSerializer):
     class Meta:
         model = Teacher
         fields = ['id', 'user', 'full_name', 'organization', 'department',
-                  'department_name', 'subjects', 'personal_room', 'is_active',
+                  'department_name', 'position', 'position_name', 'subjects',
+                  'personal_room', 'is_active',
                   'assigned_major_count', 'assigned_subject_count']
         read_only_fields = ['id', 'organization']
 

@@ -155,6 +155,13 @@ class Teacher(models.Model):
     )
     subjects      = models.ManyToManyField('academic.Subject', blank=True, verbose_name="O'qita oladigan fanlar")
     personal_room = models.ForeignKey('organizations.Room', on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Shaxsiy xona")
+    position      = models.ForeignKey(
+        'organizations.Position',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='teachers',
+        verbose_name="Lavozim"
+    )
     is_active     = models.BooleanField(default=True)
 
     class Meta:

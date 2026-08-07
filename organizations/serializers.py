@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Organization, Building, Room, Department
+from .models import Organization, Building, Room, Department, Position
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -38,4 +38,11 @@ class DepartmentSerializer(serializers.ModelSerializer):
         model = Department
         fields = ['id', 'organization', 'name', 'order',
                   'manager', 'manager_name', 'is_active']
+        read_only_fields = ['id', 'organization']
+
+
+class PositionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Position
+        fields = ['id', 'organization', 'name', 'is_active']
         read_only_fields = ['id', 'organization']
