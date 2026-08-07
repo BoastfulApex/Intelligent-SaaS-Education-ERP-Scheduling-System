@@ -162,7 +162,16 @@ class ScheduleEntrySerializer(serializers.ModelSerializer):
 
 
 class ScheduleSerializer(serializers.ModelSerializer):
-    entries        = ScheduleEntrySerializer(many=True, read_only=True)
+    # `entries` (to'liq nested ScheduleEntrySerializer, many=True) ATAYLAB
+    # OLIB TASHLANDI — haqiqiy bug edi: bu maydon list/retrieve'da HAR BIR
+    # jadval uchun BARCHA darslarni (masalan 1283 ta) to'liq serialize
+    # qilardi, har biri esa o'zida teacher/group/subject/room/building/para
+    # FK'larini o'qiydi (`ScheduleEntrySerializer`) — `get_queryset()`da
+    # hech qanday `select_related`/`prefetch_related` yo'qligi sababli bu
+    # N+1 so'rovlar zanjiriga olib kelardi (bitta jadval uchun ~9000+ so'rov),
+    # "Jadvallar" ro'yxati sahifasini butunlay "qotirib" qo'yardi. Frontend
+    # bu maydondan HECH QAYERDA foydalanmaydi — haqiqiy darslar alohida
+    # `by-group`/`by-teacher` action'lari orqali olinadi (tekshirildi).
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     total_entries  = serializers.SerializerMethodField()
 
@@ -170,7 +179,7 @@ class ScheduleSerializer(serializers.ModelSerializer):
         model = Schedule
         fields = ['id', 'organization', 'title', 'month', 'year',
                   'date_from', 'date_to', 'status', 'status_display',
-                  'generated_by', 'generated_at', 'total_entries', 'entries',
+                  'generated_by', 'generated_at', 'total_entries',
                   # Generatsiya jarayoni (progress bar uchun) — ro'yxat
                   # sahifasi shu maydonlarga qarab "Tuzilmoqda" holatini
                   # ko'rsatadi va progress oynasini ochish tugmasini beradi
@@ -179,7 +188,13 @@ class ScheduleSerializer(serializers.ModelSerializer):
                             'gen_step']
 
     def get_total_entries(self, obj):
-        return obj.entries.count()
+        # `get_queryset()`dagi `.annotate(entries_count=Count('entries'))`
+        # bo'lsa shuni ishlatadi (bitta JOIN so'rovi, N+1 yo'q) — annotate
+        # qilinmagan holatlarda (masalan `generate` action'ining 202
+        # javobida to'g'ridan-to'g'ri model instansiyasi bilan) xavfsiz
+        # zaxira sifatida `.count()` ga tushadi.
+        annotated = getattr(obj, 'entries_count', None)
+        return annotated if annotated is not None else obj.entries.count()
 
 
 class SubstitutionSerializer(serializers.ModelSerializer):

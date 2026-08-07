@@ -720,7 +720,7 @@ class ScheduleViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Schedule.objects.filter(
             organization=self.request.user.organization
-        )
+        ).annotate(entries_count=Count('entries'))
 
     @action(detail=False, methods=['post'], url_path='generate')
     def generate(self, request):
@@ -968,8 +968,18 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             permission_classes=[IsAuthenticated])
     def by_group(self, request, pk=None, group_id=None):
         schedule = self.get_object()
-        entries  = schedule.entries.filter(
+        # `select_related` — ScheduleEntrySerializer har bir qator uchun
+        # teacher/group/subject/room/building/para FK'larini o'qiydi
+        # (`get_teacher_name`, `group_name`, ... maydonlari). Buning
+        # oldindan JOIN qilinmasdan chaqirilishi haqiqiy N+1 bug edi —
+        # bitta guruhning bir oylik jadvali uchun ham yuzlab qo'shimcha
+        # so'rov keltirib chiqarardi, serverda esa (sekinroq DB round-trip)
+        # bu gunicorn so'rov vaqt limitidan (odatda 30s) oshib, "Ko'rish"ni
+        # butunlay ishlamay qo'yishiga olib kelgan (haqiqiy bug, tuzatilgan).
+        entries = schedule.entries.filter(
             group_id=group_id
+        ).select_related(
+            'teacher__user', 'group', 'subject', 'room', 'building', 'para'
         ).order_by('date', 'para__order')
         return Response(ScheduleEntrySerializer(entries, many=True).data)
 
@@ -977,8 +987,10 @@ class ScheduleViewSet(viewsets.ModelViewSet):
             permission_classes=[IsAuthenticated])
     def by_teacher(self, request, pk=None, teacher_id=None):
         schedule = self.get_object()
-        entries  = schedule.entries.filter(
+        entries = schedule.entries.filter(
             teacher_id=teacher_id
+        ).select_related(
+            'teacher__user', 'group', 'subject', 'room', 'building', 'para'
         ).order_by('date', 'para__order')
         return Response(ScheduleEntrySerializer(entries, many=True).data)
 
