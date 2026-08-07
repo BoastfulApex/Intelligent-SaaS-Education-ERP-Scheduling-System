@@ -4,7 +4,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, SAFE_METHODS
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.db import transaction
 from .models import (Major, Subject, Curriculum, CurriculumBlock,
@@ -785,6 +785,19 @@ class GroupViewSet(viewsets.ModelViewSet):
     serializer_class = GroupSerializer
     permission_classes = [IsEduAdminWriteMethodistRead]
     pagination_class = GroupPagination
+
+    def get_permissions(self):
+        # dept_manager — `IsEduAdminWriteMethodistRead` uni umuman chiqarib
+        # tashlaydi (faqat edu_admin+ yozadi, methodist o'qiydi), lekin
+        # Dashboard statistikasi va "Jadval → Ko'rish" sahifasi guruhlar
+        # ro'yxatini FAQAT O'QISH uchun so'raydi — dept_manager uchun 403
+        # qaytarib kelgan (haqiqiy bug). Faqat GET/HEAD/OPTIONS uchun,
+        # faqat dept_manager uchun ochiladi; yozish hamon edu_admin+da qoladi.
+        if (self.request.method in SAFE_METHODS
+                and self.request.user.is_authenticated
+                and self.request.user.role == 'dept_manager'):
+            return [IsAuthenticated()]
+        return super().get_permissions()
 
     def get_queryset(self):
         return Group.objects.filter(
