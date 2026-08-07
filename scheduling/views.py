@@ -710,12 +710,24 @@ class ScheduleViewSet(viewsets.ModelViewSet):
         # list/retrieve — kafedra mudiri ham "Ko'rish" sahifasida jadvalni
         # (hatto hali `draft` holatida, nashr etilmagan bo'lsa ham) ko'ra olishi
         # kerak — boshqa detail action'lar (by-group/filters/teacher-days/
-        # free-teachers) allaqachon shu ViewSet ichida IsAuthenticated bilan
-        # ochiq edi, faqat asosiy list/retrieve IsEduAdmin bilan cheklangan edi.
-        # Yaratish/generatsiya/nashr/o'chirish hamon faqat IsEduAdmin+.
+        # free-teachers/progress) allaqachon shu ViewSet ichida o'zining
+        # `@action(permission_classes=[IsAuthenticated])` bilan ochiq edi.
+        #
+        # HAQIQIY BUG (o'zim shu yerda takrorlagan edim — roles-permissions.md
+        # da avvaldan hujjatlashtirilgan tuzoq): `get_permissions()` override
+        # qilingan ViewSet'da `@action`ning o'z `permission_classes`i DRF
+        # tomonidan ALLAQACHON `self.permission_classes`ga o'rnatib qo'yilgan
+        # bo'ladi (`dispatch`/`initialize_request` orqali) — lekin agar bu yerda
+        # qattiq kodlangan `[IsEduAdmin()]` qaytarilsa, o'sha action-darajasidagi
+        # qiymat butunlay E'TIBORGA OLINMAYDI. Shu sabab `filters`/`by-group`
+        # kabi IsAuthenticated bo'lishi kerak bo'lgan action'lar ham noto'g'ri
+        # ravishda IsEduAdmin'ga qulflanib qolgan edi (dept_manager uchun 403).
+        # Tuzatish — `super().get_permissions()` chaqirish, u `self.permission_
+        # classes`ni (DRF allaqachon to'g'ri action-specific qiymat bilan
+        # to'ldirgan) hurmat qiladi.
         if self.action in ('list', 'retrieve'):
             return [IsAuthenticated()]
-        return [IsEduAdmin()]
+        return super().get_permissions()
 
     def get_queryset(self):
         return Schedule.objects.filter(
