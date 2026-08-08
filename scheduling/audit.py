@@ -114,7 +114,7 @@ def connect_all():
     from accounts.models import User
     from .models import (
         Teacher, TeacherBusyTime, TeacherSubjectAssignment, TeacherMonthlyLoad,
-        Schedule, ScheduleEntry, Substitution, LoadSheet, GroupSubject,
+        Schedule, ScheduleEntry, Substitution, LoadSheet, GroupSubject, LessonJournal,
     )
 
     # organizations
@@ -147,3 +147,4 @@ def connect_all():
     register_audit(Substitution, org_path='schedule_entry.schedule.organization')
     register_audit(LoadSheet, org_path='department.organization')
     register_audit(GroupSubject, org_path='curriculum_subject.block.curriculum.major.organization')
+    register_audit(LessonJournal, org_path='teacher.organization')

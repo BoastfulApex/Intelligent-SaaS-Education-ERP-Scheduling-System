@@ -417,6 +417,70 @@ class ScheduleEntry(models.Model):
         )
 
 
+class LessonJournal(models.Model):
+    """
+    O'qituvchi tomonidan to'ldiriladigan DARS JURNALI — "shu kuni shu guruhda
+    qaysi mavzuni o'tdim" yozuvi.
+
+    **Muhim arxitektura qarori**: `ScheduleEntry`ga BEVOSITA (qat'iy) bog'lanmaydi.
+    `Schedule.generate` qayta chaqirilganda (`ScheduleViewSet.generate`) barcha
+    eski `ScheduleEntry`lar avval o'chirilib, keyin qaytadan yaratiladi
+    (`schedule.entries.all().delete()` + `bulk_create`, `schedule-generation.md`).
+    Agar jurnal shu yozuvga qattiq (`CASCADE`) bog'langan bo'lsa, admin jadvalni
+    qayta generatsiya qilganda o'qituvchi kiritgan BARCHA mavzular yo'qolib
+    qolar edi. Shuning uchun haqiqiy "identifikator" —
+    (teacher, group, subject, para, date) juftligi; `schedule_entry` esa faqat
+    qulaylik/izchillik uchun ixtiyoriy (`SET_NULL`) havola — jadval qayta
+    generatsiya qilinganda `ScheduleViewSet` shu yozuvlarni yangi
+    `ScheduleEntry`lar bilan qayta bog'laydi (`_sync_lesson_journal`), lekin
+    `topic` maydoni (va boshqa hamma narsa) o'zgarishsiz qoladi.
+    """
+    class Status(models.TextChoices):
+        PLANNED = 'planned', 'Rejalashtirilgan'
+        DONE    = 'done',    "O'tildi"
+
+    teacher = models.ForeignKey(
+        'scheduling.Teacher', on_delete=models.CASCADE,
+        related_name='journal_entries', verbose_name="O'qituvchi"
+    )
+    group   = models.ForeignKey(
+        'academic.Group', on_delete=models.CASCADE,
+        related_name='journal_entries', verbose_name="Guruh"
+    )
+    subject = models.ForeignKey(
+        'academic.Subject', on_delete=models.CASCADE,
+        related_name='journal_entries', verbose_name="Fan"
+    )
+    para    = models.ForeignKey(
+        'academic.Para', on_delete=models.CASCADE,
+        related_name='journal_entries', verbose_name="Para"
+    )
+    date    = models.DateField(verbose_name="Dars sanasi")
+    lesson_type = models.CharField(
+        max_length=20,
+        choices=[('lecture', 'Nazariy'), ('practice', 'Amaliy')],
+    )
+    schedule_entry = models.ForeignKey(
+        ScheduleEntry, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='journal_entries', verbose_name="Jadval yozuvi"
+    )
+    topic      = models.TextField(blank=True, default='', verbose_name="O'tilgan mavzu")
+    status     = models.CharField(max_length=10, choices=Status.choices, default=Status.PLANNED)
+    filled_at  = models.DateTimeField(null=True, blank=True, verbose_name="To'ldirilgan vaqti")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'lesson_journal'
+        verbose_name = "Dars jurnali"
+        verbose_name_plural = "Dars jurnali"
+        unique_together = ['teacher', 'group', 'subject', 'para', 'date']
+        ordering = ['date', 'para__order']
+
+    def __str__(self):
+        return f"{self.date} | {self.teacher} | {self.group} | {self.subject}"
+
+
 class Substitution(models.Model):
     """
     O'rinbosarlik — o'qituvchi kela olmasa

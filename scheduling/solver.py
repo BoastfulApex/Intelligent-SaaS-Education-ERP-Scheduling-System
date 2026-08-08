@@ -72,6 +72,12 @@ class Task:
     # Ko'chma mashg'ulot vazifasimi (CurriculumSubject.field_hours dan) —
     # bunday darslar o'quv jarayonining OXIRIGA, ketma-ket va XONASIZ qo'yiladi
     is_field:     bool = False
+    # Auditoriya vazifasining nechta parasi NAZARIY deb belgilanishi kerak.
+    # Qolganlari AMALIY bo'ladi. Belgilash solver ishlagandan KEYIN, joylashgan
+    # paralarni vaqt bo'yicha tartiblab bajariladi (9-bo'lim) — shuning uchun
+    # "avval nazariy, keyin amaliy" tartibi QURILISHI BO'YICHA ta'minlanadi,
+    # hech qanday cheklov kerak emas.
+    lec_paras:    int = 0
 
     # Haftalik taqsimot (0 = cheklov yo'q) — guruhning o'z group_start'idan hisoblanadi
     week_hours: list = field(default_factory=lambda: [0, 0, 0, 0])
@@ -85,7 +91,48 @@ DEPT_WINDOW_SLACK = 2
 # Bir kunda viloyatda bo'lishi mumkin bo'lgan o'qituvchilar soni — o'sha kuni
 # viloyatda dars oladigan GURUHLAR soniga qo'shiladigan zaxira (foydalanuvchi
 # qoidasi 2: "nechta guruh bo'lsa n+2 ta o'qituvchi").
-REGIONAL_TEACHER_SLACK = 4
+REGIONAL_TEACHER_SLACK = 3
+
+# Viloyatga kelgan o'qituvchi bir kunda kamida NECHTA para o'tishi shart.
+# 1 = QAT'IY qoida o'chirilgan (joriy holat), 2 = "1 para uchun kelmasin".
+#
+# **QAT'IY variant sinaldi va RAD ETILDI** (o'lchangan, 900s, real dump):
+#
+# |                        | qoida BILAN | qoida SIZ |
+# |------------------------|-------------|-----------|
+# | joylashgan             | 1283        | 1283      |
+# | 1-BOSQICH vaqti        | **585s**    | **80s**   |
+# | kuniga 1 para          | 0/113 (0%)  | 21/113 (19%) |
+# | bo'sh kunsiz o'qituvchi| 15/24 (62%) | **22/24 (92%)** |
+# | jami bo'sh kun         | 12          | **4**     |
+#
+# Ya'ni qat'iy qoida 8 ta QO'SHIMCHA bo'sh kun keltirib chiqaradi va solverni
+# 7 barobar sekinlashtiradi (generatsiya 4 daqiqadan 12–15 daqiqaga cho'ziladi).
+# Foydalanuvchi uchun bo'sh kun muhimroq ("bo'sh kun bo'lmasligi kerak"),
+# 1 paralik kunlar esa 5–10% atrofida maqbul deb belgilangan.
+#
+# Qo'lda tuzilgan may jadvalida ham qoida 100% bajarilmaydi: viloyatdagi
+# 104 o'qituvchi-kunning 3 tasi (3%) bir paralik — ya'ni odamlar ham buni
+# QAT'IY emas, moslashuvchan qo'llaydi.
+#
+# Buning o'rniga 1 paralik kunlar YUMSHOQ yo'l bilan kamaytiriladi:
+# `REGIONAL_PRESENCE_WEIGHT` (quyida) — darslar soni o'zgarmagani uchun
+# o'qituvchi-kunlar kamaysa, qolgan kunlar avtomatik to'ladi.
+REGIONAL_MIN_PARAS_PER_DAY = 1
+
+# Viloyatda o'qituvchining KUN ICHIDA bo'sh parasi (teshigi) taqiqlansinmi.
+# True  = teshik 0% (qat'iy), lekin bo'sh KUNLAR biroz ko'payadi
+# False = teshik ~10-13% (qo'lda tuzilgan jadvalda ham 11%), bo'sh kun kamroq
+# Foydalanuvchi qarori: viloyatda bo'sh KUN bo'sh PARAdan qimmatroq
+# (komandirovkada ortiqcha kun = yo'l + turar joy), shuning uchun kun ustuvor.
+REGIONAL_NO_GAP_WITHIN_DAY = True
+
+# VILOYAT bosqichida bitta (o'qituvchi, kun) — ya'ni komandirovka kuni —
+# uchun jazo vazni. Uni oshirish 1 paralik kunlarni kamaytiradi (kunlar
+# kamayadi, qolganlari to'ladi), lekin bo'sh kun jazolari (100/5000) bilan
+# raqobatlashadi — juda katta qilinsa kunlar siyraklashib bo'shliq paydo
+# bo'lishi mumkin. O'lchab tanlanadi.
+REGIONAL_PRESENCE_WEIGHT = 150
 
 # **SINALGAN VA RAD ETILGAN — "ikki safar"**: ko'chma + oddiy fani bor
 # o'qituvchi viloyatga ikki marta borsin (boshida oddiy darslar, uyga qaytadi,
@@ -460,14 +507,46 @@ def generate_schedule(
                 # joylashtirilardi — real ma'lumotda ko'chma soati bor 22 fandan
                 # 20 tasi shunday ARALASH edi, ya'ni ularning ko'chma qismi
                 # butunlay ko'rinmas bo'lib qolgan.
-                # Endi bitta CurriculumSubject ikkita vazifaga bo'linadi:
-                #   1) auditoriya (nazariy + amaliy) — odatdagidek, xonali
+                # Bitta CurriculumSubject IKKITA vazifaga bo'linadi:
+                #   1) auditoriya (nazariy + amaliy) — xonali. Nazariy/amaliy
+                #      BELGISI solver ishlagandan keyin qo'yiladi (`lec_paras`)
                 #   2) ko'chma (field_hours) — o'quv jarayonining OXIRIDA,
                 #      ketma-ket, XONASIZ (tinglovchilar tashqarida amaliyot qiladi)
-                aud_hours = cs.lecture_hours + cs.practice_hours
-                field_hours = cs.field_hours
+                #
+                # **Haqiqiy bug #2 (tuzatilgan)**: avval auditoriya vazifasiga
+                # BITTA tur berilardi (`'lecture' if cs.lecture_hours > 0 else
+                # 'practice'`), ya'ni nazariy soati bor HAR QANDAY fanning
+                # amaliy qismi ham "nazariy" deb belgilanardi. O'lchangan:
+                #   o'quv rejada  1050 soat nazariy / 982 soat amaliy (48% amaliy)
+                #   generatsiyada 322 dars nazariy / 30 dars amaliy  ( 8% amaliy)
+                # ya'ni 182 ta aralash fanning amaliy qismi ko'rinmay qolgan.
+                # Qo'lda tuzilgan haqiqiy jadvalda 149 nazariy / 206 amaliy.
+                #
+                # **SINALGAN VA RAD ETILGAN — alohida vazifaga ajratish**:
+                # dastlab nazariy va amaliy IKKITA alohida `Task` qilingan edi,
+                # tartib esa CP-SAT cheklovi bilan ta'minlangan. O'lchangan
+                # oqibatlari (real dump, sentabr 2026):
+                #   vazifalar soni  300 -> 506  (model deyarli ikki barobar)
+                #   vaqt            240s yetardi -> 420–800s ham yetmasdi
+                #   qat'iy tartib   1270/1283 (13 ta DARS YO'QOLDI)
+                #   yumshoq tartib  1283/1283, lekin 67–76 ta buzilish (36–40%)
+                # Ya'ni ikkala talab (dars yo'qolmasin + tartib saqlansin) bir
+                # vaqtda bajarilmasdi.
+                #
+                # Yechim: nazariy va amaliy — bir xil o'qituvchi, guruh va fan,
+                # ular faqat BELGISI bilan farq qiladi. Shuning uchun solverga
+                # ikkita vazifa berish shart emas: bitta vazifa joylashtiriladi,
+                # so'ng joylashgan paralar VAQT BO'YICHA tartiblanib, birinchi
+                # `lec_paras` tasi "nazariy", qolgani "amaliy" deb belgilanadi
+                # (9-bo'lim). Tartib QURILISHI BO'YICHA to'g'ri chiqadi —
+                # cheklov ham, qo'shimcha o'zgaruvchi ham kerak emas.
+                lec_hours   = cs.lecture_hours or 0
+                prac_hours  = cs.practice_hours or 0
+                field_hours = cs.field_hours or 0
+                aud_hours   = lec_hours + prac_hours
 
-                def _mk(hours_, lesson_type_, is_field_, week_hours_):
+                def _mk(hours_, lesson_type_, is_field_, week_hours_,
+                        lec_paras_=0):
                     return Task(
                         dist_id=dist_id,
                         teacher_id=teacher_id,
@@ -482,15 +561,21 @@ def generate_schedule(
                         requires_computer_room=requires_computer_room,
                         department_id=cs.department_id,
                         is_field=is_field_,
+                        lec_paras=lec_paras_,
                         week_hours=week_hours_,
                     )
 
                 if aud_hours >= 2:
+                    # `room_type` xona tanlash uchun kerak — vazifada nazariy
+                    # soat bo'lsa ma'ruza xonasi mos keladi, aks holda amaliy.
+                    # Yakuniy dars TURI esa har bir para uchun alohida,
+                    # `lec_paras` bo'yicha qo'yiladi.
                     tasks.append(_mk(
                         aud_hours,
-                        'lecture' if cs.lecture_hours > 0 else 'practice',
+                        'lecture' if lec_hours > 0 else 'practice',
                         False,
                         week_hours,
+                        lec_paras_=lec_hours // 2,
                     ))
                 if field_hours >= 2:
                     # Ko'chma mashg'ulotga haftalik reja QO'LLANILMAYDI — u
@@ -1177,6 +1262,63 @@ def generate_schedule(
         if len(vars_) > 1:
             model.add(sum(vars_) <= 1)
 
+    # ── CONSTRAINT 2c: O'QITUVCHINING KUNIDA TESHIK BO'LMASIN ────────────────
+    # **Foydalanuvchi qoidasi**: "O'qituvchi uchun maksimal bo'sh kun va bo'sh
+    # para qoldirilmasligi kerak."
+    #
+    # **Haqiqiy bug**: `Constraint 5` kun ichida teshikni faqat GURUH uchun
+    # taqiqlardi. O'qituvchi esa I-parada dars berib, II-parani bo'sh o'tkazib,
+    # III-parada yana darsga kirishi mumkin edi — real jadvalda (#52) o'lchandi:
+    # **73/559 o'qituvchi-kun (13%) teshikli** (63 tasida 1 para, 10 tasida
+    # 2 para bo'shliq). O'qituvchi uchun bu eng noqulay holat — u kelib,
+    # kutib o'tirishi kerak.
+    #
+    # Formulasi ATAYLAB yangi o'zgaruvchisiz: `Constraint 2` allaqachon
+    # kafolatlaydiki har bir (o'qituvchi, vaqt) uchun `sum(vars) <= 1`, ya'ni
+    # bu yig'indi 0/1 IFODA — alohida bool kerak emas. Uchlik uchun taqiq:
+    #     S_i + S_k - S_j <= 1      (i < j < k, vaqt bo'yicha tartibda)
+    # ya'ni "birinchi va uchinchida bor, o'rtada yo'q" holati imkonsiz.
+    # Kunda para soni kam (3–4), shuning uchun uchliklar soni ham kichik.
+    #
+    # MUHIM: yangi o'zgaruvchi qo'shish 1-bosqichni sekinlashtirib darslarni
+    # yo'qotishi o'lchangan (yuqoridagi `tg_day_single` tarixiga qarang) —
+    # shuning uchun bu yerda faqat mavjud `x` lar ustidan chiziqli cheklov.
+    # **FAQAT VILOYAT binolarida** (foydalanuvchi bilan aniqlashtirilgan:
+    # "faqat viloyatda o'qituvchi uchun maksimal bo'sh kun va bo'sh para
+    # qoldirilmasligi kerak"). Markazda o'qituvchi o'z shahrida yashaydi va
+    # u yerda HAFTALIK REJA ustun turadi — kun ichidagi bo'shliqni taqiqlash
+    # rejaga qarshi ishlab, darslarni yo'qotardi (o'lchangan: butun tashkilotga
+    # qo'llanganda 1283 -> 1282).
+    # `Constraint 2b` bir kunda faqat bitta bino kafolatlaydi, shuning uchun
+    # o'sha kuni o'qituvchi markazda bo'lsa, quyidagi viloyat o'zgaruvchilari
+    # baribir 0 bo'ladi va cheklov o'z-o'zidan bajariladi.
+    regional_building_ids = set(
+        Building.objects.filter(organization=organization, is_regional=True)
+        .values_list('id', flat=True)
+    )
+    teacher_day_times: defaultdict[tuple, defaultdict] = defaultdict(
+        lambda: defaultdict(list))
+    for (ti, si), var in x.items():
+        if tasks[ti].teacher_id is None:
+            continue
+        if slot_building.get((ti, si)) not in regional_building_ids:
+            continue
+        slot = slots[si]
+        para = para_by_id[slot.para_id]
+        teacher_day_times[(tasks[ti].teacher_id, slot.date)][
+            para.start_time].append(var)
+
+    for by_time in (teacher_day_times.values()
+                    if REGIONAL_NO_GAP_WITHIN_DAY else ()):
+        times = sorted(by_time)
+        if len(times) < 3:
+            continue
+        for a in range(len(times)):
+            for b in range(a + 1, len(times) - 1):
+                for c in range(b + 1, len(times)):
+                    model.add(sum(by_time[times[a]]) + sum(by_time[times[c]])
+                              - sum(by_time[times[b]]) <= 1)
+
     # ── CONSTRAINT 2b: O'qituvchi BIR KUNDA faqat BITTA binoda ───────────────
     # **Foydalanuvchi qoidasi 2.1**: "Hech qachon bir o'qituvchiga 2 ta binoda
     # darsni ketma-ket paraga qo'yish mumkin emas. Bitta binoda darsda bo'lgan
@@ -1268,6 +1410,97 @@ def generate_schedule(
             # Kun ishlatilgan = birinchi para band (ketma-ketlik tufayli ekvivalent)
             group_day_used[key] = y_list[0]
 
+    # ── PARCHALANISHGA QARSHI ────────────────────────────────────────────────
+    # Qo'lda tuzilgan haqiqiy jadval (`iyun.xlsx`) bilan o'lchab solishtirilgan:
+    #
+    #   o'qituvchi bir guruhga kirsa nechta para o'tadi:
+    #                        qo'lda    dastur (tuzatishdan oldin)
+    #        1 para           45%   →   56%    ← juda parchalangan
+    #        2 para           40%   →   31%
+    #        ketma-ket        99%   →   82%
+    #   guruh kunining naqshi:
+    #        "2+2"            32%   →    6%    ← deyarli yo'qolgan
+    #        "1+1+1+1"         8%   →   30%    ← 4 barobar ko'p
+    #        "4"               3%   →   10%    ← zerikarli
+    #
+    # Ya'ni tinglovchi kuniga 2 ta o'qituvchi o'rniga 4 ta har xil o'qituvchini
+    # ko'radi. Maqsad — 2 paralik blok (qo'lda tuzilgan jadvaldagi ustun naqsh).
+    #
+    # Ikki tomonlama yondashuv, chunki faqat bittasi yetarli emas:
+    #   (a) QAT'IY yuqori chegara — bitta fan bir kunda butun kunni egallamasin
+    #       (foydalanuvchi: "bitta o'qituvchi 4 ta parani bitta fanda o'tishi
+    #       yaxshi emas, zerikarli bo'lib qoladi")
+    #   (b) YUMSHOQ jazo — (o'qituvchi, guruh, kun) uchliklari soni kamaysin.
+    #       Bu 1+1+1+1 (4 ta uchlik) o'rniga 2+2 (2 ta uchlik) ni afzal qiladi.
+    #       (a) siz bu 4+0 ga (1 ta uchlik) surib yuborardi — shuning uchun
+    #       ikkalasi BIRGA ishlatiladi.
+    SUBJECT_DAY_MAX_PARA = 3
+
+    subj_day_vars: defaultdict[tuple, list] = defaultdict(list)
+    tg_day_vars: defaultdict[tuple, list] = defaultdict(list)
+    tg_day_tasks: defaultdict[tuple, set] = defaultdict(set)
+    for (ti, si), var in x.items():
+        t = tasks[ti]
+        d = slots[si].date
+        subj_day_vars[(t.group_id, t.subject_id, d)].append(var)
+        if t.teacher_id:
+            tg_day_vars[(t.teacher_id, t.group_id, d)].append(var)
+            tg_day_tasks[(t.teacher_id, t.group_id, d)].add(ti)
+
+    for vars_ in subj_day_vars.values():
+        if len(vars_) > SUBJECT_DAY_MAX_PARA:
+            model.add(sum(vars_) <= SUBJECT_DAY_MAX_PARA)
+
+    # (o'qituvchi, guruh, kun) bandligi — MARKAZ bosqichida jazolanadi.
+    # MUHIM: ikkala yo'nalish ham bog'lanadi. Faqat `var -> b` bo'lsa, solver
+    # darsi YO'Q uchliklarga ham b=1 qo'yib, jazoni "aldab" o'tishi mumkin
+    # (bu loyihada `gf` va `presence` bilan ikki marta uchragan haqiqiy xato).
+    #
+    # ── SINALGAN VA RAD ETILGAN: "kelgan o'qituvchi kamida 2 para o'tsin" ────
+    # QAT'IY cheklov sifatida sinaldi (`sum(paralar) >= 2 * b`, ya'ni 0 yoki
+    # >=2), o'qituvchining shu guruhdagi umumiy yuki >=2 bo'lgan holatlarda.
+    # Natija (420s, real dump): **1201/1283 — 82 ta DARS YO'QOLDI**.
+    #
+    # Sabab STRUKTURAVIY va muhim: bu ma'lumotdagi smenalarning ko'pchiligi
+    # 3 PARALI ("Kunduzgi" va "Kechki" — 3 para, faqat "Kunduzgi 4 Para
+    # Ertalab" 4 parali). 3 paralik kunda "har bir o'qituvchi >= 2 para"
+    # degani amalda "kuniga faqat BITTA o'qituvchi" degani (2+2=4 > 3).
+    # O'lchov buni tasdiqladi: "3" naqshi 61% ga sakradi, ya'ni bitta
+    # o'qituvchi butun kunni egallab oldi — bu esa foydalanuvchi ataylab
+    # istamagan holat ("zerikarli bo'lib qoladi").
+    #
+    # MUHIM XULOSA: qo'lda tuzilgan jadval bilan "2+2" naqshi bo'yicha
+    # solishtirish NOTO'G'RI edi — u 4 PARALI kunlarga qurilgan (iyun.xlsx da
+    # barcha kunlar 4 para). 3 paralik kunda "2+2" umuman mumkin emas; u
+    # yerdagi eng yaxshi naqsh — "2+1" yoki "3". Shuning uchun maqsad
+    # "1+1+1" ni "2+1" ga aylantirish bo'lishi kerak, "2+2" ga emas.
+    # `tg_day_bools` — kalit bo'yicha saqlanadi, chunki jazo VILOYAT va MARKAZ
+    # bosqichlariga ALOHIDA bo'linadi (viloyat vazifalari `regional_tasks`
+    # quyida hisoblanadi, shuning uchun ajratish maqsad funksiyasida bo'ladi).
+    teacher_group_day_bools = []
+    tg_day_bools: dict[tuple, object] = {}
+    # ── SINALGAN VA RAD ETILGAN: "aynan 1 paralik blok" jazosi ───────────────
+    # Nishonga aniqroq olingan jazo yozishga ikki marta urinildi — blok AYNAN
+    # 1 para bo'lsa jazolanadi (2 va 3 orasida farq qo'ymay, ya'ni 2 dan 3 ga
+    # surish uchun rag'bat bermay). Ikkala shakl ham RAD ETILDI, chunki
+    # ikkalasi ham modelga YANGI O'ZGARUVCHI qo'shadi va shu bilan
+    # **1-BOSQICHNI** (maksimal dars soni) sekinlashtiradi:
+    #   (a) reifikatsiya (`sum == 1` <-> bool): 1-bosqich 40s -> 110s,
+    #       viloyat bosqichlariga vaqt qolmay bo'sh kunsizlik 10/24 ga tushdi
+    #   (b) chiziqli `pair` bool (`2*pr <= sum(vars_)`, jazo = `b - pr`):
+    #       1-bosqich 120s limitiga yetdi va **1273/1283 — 10 ta dars yo'qoldi**
+    # 1-bosqich eng ustuvor qoidani (hech bir dars yo'qolmasin) ta'minlaydi va
+    # modelning har qanday kengayishiga sezgir. Shuning uchun parchalanish
+    # jazosi FAQAT allaqachon mavjud `tg_day_bools` orqali beriladi — yangi
+    # o'zgaruvchi qo'shilmaydi.
+    for key, vars_ in tg_day_vars.items():
+        b = model.new_bool_var(f'tgd_{key[0]}_{key[1]}_{key[2]}')
+        for v in vars_:
+            model.add_implication(v, b)
+        model.add(b <= sum(vars_))
+        teacher_group_day_bools.append(b)
+        tg_day_bools[key] = b
+
     # ── VILOYAT BINOLARI: komandirovkani minimallashtirish ────────────────────
     # `Building.is_regional=True` binolarga o'qituvchilar KOMANDIROVKAGA yuboriladi.
     # Foydalanuvchi belgilagan chekinib bo'lmaydigan qoidalar:
@@ -1278,10 +1511,6 @@ def generate_schedule(
     # Buning evaziga haftalik reja chetlanishi viloyatda maqbul (foydalanuvchi
     # bilan aniqlashtirilgan) — shuning uchun quyida viloyat vazifalari uchun
     # `week_dev` jazosi ancha past vazn bilan hisoblanadi.
-    regional_building_ids = set(
-        Building.objects.filter(organization=organization, is_regional=True)
-        .values_list('id', flat=True)
-    )
     presence_vars = []        # (o'qituvchi, kun) — komandirovka kunlari
     trip_vars = []            # (o'qituvchi, hafta) — alohida safarlar soni
     task_day_vars = []        # (vazifa, kun) — fan nechta kunga yoyilgan
@@ -1339,6 +1568,28 @@ def generate_schedule(
         teacher_day_bool = _presence('present', regional_teacher_day, presence_vars)
         _presence('trip', regional_teacher_week, trip_vars)
         task_day_bool = _presence('tday', regional_task_day, task_day_vars)
+
+        # ── QAT'IY: viloyatga kelgan o'qituvchi kuniga KAMIDA 2 PARA o'tsin ──
+        # **Foydalanuvchi qoidasi**: "bir kunda o'qituvchi faqat 1 para
+        # o'tishiga mumkin bo'lmasligi kerak, 2+ paralar bo'lishi shart".
+        # Mantiq: viloyatga komandirovkaga borish uchun 1 para arzimaydi.
+        #
+        # `teacher_day_bool` ikki tomonlama bog'langan (yuqoridagi `_presence`
+        # izohiga qarang), ya'ni `p = 1` AYNAN "shu kuni dars bor" degani.
+        # Shuning uchun `sum(vars) >= 2 * p` — yangi o'zgaruvchisiz aniq
+        # "0 yoki 2+" shartini beradi.
+        #
+        # DIQQAT — bu (o'qituvchi, KUN) darajasida, `(o'qituvchi, GURUH, kun)`
+        # darajasida EMAS. Ikkinchisi avval sinalgan va **82 ta dars
+        # yo'qotgan** edi (3 paralik smenada "har guruhga >= 2 para" amalda
+        # "kuniga bitta guruh" degani bo'lib qolardi). Bu yerdagi shakl
+        # yumshoqroq: o'qituvchi ikki guruhga 1 paradan bersa ham shart
+        # bajariladi.
+        if REGIONAL_MIN_PARAS_PER_DAY > 1:
+            for key, p in teacher_day_bool.items():
+                vars_ = regional_teacher_day[key]
+                if len(vars_) >= REGIONAL_MIN_PARAS_PER_DAY:
+                    model.add(sum(vars_) >= REGIONAL_MIN_PARAS_PER_DAY * p)
 
         # ── QAT'IY: bir kunda viloyatda ko'pi bilan (guruh soni + 2) o'qituvchi ──
         # **Foydalanuvchi qoidasi 2**: "maksimal nechta guruh bo'lsa faqat n+2 ta
@@ -1766,13 +2017,55 @@ def generate_schedule(
        f"Jami {sum(t.paras_needed for t in tasks)} ta dars joylashtirilishi kerak. "
        "Bu eng muhim qadam — hech bir dars tushib qolmasligi shart.")
 
+    # ── QAYTA URINISH: 1-bosqich maksimumga yetmasa ──────────────────────────
+    # O'lchangan HAQIQIY muammo: bir xil ma'lumot va bir xil kodda 5 ta ketma-ket
+    # ishga tushirish 1283, 1282, 1283, 1273, 1275 berdi — ya'ni ~40% hollarda
+    # ENG USTUVOR qoida ("hech bir dars yo'qolmasin") buzilardi. Sabab kodda
+    # emas: CP-SAT ko'p oqimli (`num_search_workers`), qidiruv yo'li har safar
+    # boshqacha va ba'zan 120 soniyalik byudjet ichida maksimumga yetmaydi.
+    #
+    # Yechim: maksimumga yetilmasa, boshqa `random_seed` bilan qayta urinish —
+    # eng yaxshi yechim `add_hint` orqali boshlang'ich nuqta sifatida beriladi,
+    # ya'ni natija faqat yaxshilanadi. Byudjet 0.5 dan 0.75 gacha kengaytiriladi
+    # (faqat KERAK BO'LGANDA — maksimumga yetilsa qo'shimcha urinish umuman
+    # bo'lmaydi va vaqt avvalgidek keyingi bosqichlarga o'tadi).
+    _p1_target = sum(t.paras_needed for t in tasks)
+    _p1_first = max(5.0, time_limit_seconds * 0.5)
+    _p1_cap = max(_p1_first, time_limit_seconds * 0.75)
     model.maximize(total_placed_expr)
-    solver.parameters.max_time_in_seconds = max(5.0, time_limit_seconds * 0.5)
-    status_code = solver.solve(model, _StopAtMax(sum(t.paras_needed for t in tasks)))
-    phase1_time = solver.wall_time
+
+    phase1_time = 0.0
+    best_obj = -1
+    phase1_solution: dict[tuple, int] = {}
+    status_code = cp_model.UNKNOWN
+    for _attempt in range(3):
+        if _attempt == 0:
+            _budget = _p1_first
+        else:
+            _budget = _p1_cap - phase1_time
+            if _budget < 10.0:
+                break
+            model.clear_hints()
+            for _k, _v in x.items():
+                model.add_hint(_v, phase1_solution[_k])
+        solver.parameters.random_seed = _attempt * 7919
+        solver.parameters.max_time_in_seconds = max(5.0, _budget)
+        status_code = solver.solve(model, _StopAtMax(_p1_target))
+        phase1_time += solver.wall_time
+        if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            _obj = int(solver.objective_value)
+            if _obj > best_obj:
+                best_obj = _obj
+                phase1_solution = {k: solver.value(v) for k, v in x.items()}
+        if best_obj >= _p1_target or not phase1_solution:
+            break
+    solver.parameters.random_seed = 0
+    model.clear_hints()
+
     _phase1_note = (f'1-MAKSIMAL: {solver.status_name(status_code)} '
                     f'{phase1_time:.0f}s joylashgan='
-                    f'{int(solver.objective_value) if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE) else "—"}')
+                    f'{best_obj if best_obj >= 0 else "—"}'
+                    + (f' ({_attempt + 1} urinish)' if _attempt else ''))
 
     # ── 8b/8c. BOSQICHLAR TARTIBI: AVVAL VILOYAT, KEYIN MARKAZ ───────────────
     # **Foydalanuvchi talabi (muhim tartib!)**: "Birinchi bo'lib viloyatlar uchun
@@ -1847,7 +2140,7 @@ def generate_schedule(
     # aksincha kunlarni yonma-yon qilib qo'yib, sonini o'sha holicha qoldiradi.
     # Kun soni kamaysa, bo'shliq ham tabiiy ravishda qisqaradi.
     if presence_vars:
-        phase_regional.append(150 * sum(presence_vars))
+        phase_regional.append(REGIONAL_PRESENCE_WEIGHT * sum(presence_vars))
     # "Bo'sh kun qolishi mumkin emas" (qoida 3) — indikator literal, JUDA katta
     # vazn: amalda qat'iy cheklov kabi ishlaydi, lekin modelni bloklamaydi.
     if teacher_gap_hard_terms:
@@ -1869,6 +2162,16 @@ def generate_schedule(
         phase_regional.append(10 * sum(dept_order_terms))
     if dept_spread_terms:
         phase_regional.append(5 * sum(dept_spread_terms))
+    # PARCHALANISH (viloyat) — (o'qituvchi, guruh, kun) uchliklari kam bo'lsin,
+    # ya'ni o'qituvchi kelganda 1 emas, 2 paradan o'tsin. Qo'lda tuzilgan may
+    # jadvalida 2 paralik blok 38%, 1 paralik 53%; dasturda esa 24% / 64% edi.
+    # Vazn `presence` (150) dan past — kun sonini kamaytirish baribir ustun,
+    # lekin `trip`/`task_day` bilan bir darajada, chunki blokni yiriklashtirish
+    # kun sonini ham tabiiy ravishda kamaytiradi (bir xil yo'nalishdagi maqsad).
+    reg_tg_bools = [b for k, b in tg_day_bools.items()
+                    if tg_day_tasks[k] & regional_tasks]
+    if reg_tg_bools:
+        phase_regional.append(40 * sum(reg_tg_bools))
 
     # 4-BOSQICH: boshqa binolardagi qolgan darslar.
     #   30  markazdagi haftalik rejadan chetlanish (akademik talab)
@@ -1879,13 +2182,26 @@ def generate_schedule(
         phase_central.append(30 * sum(central_dev))
     if group_day_used:
         phase_central.append(sum(group_day_used.values()))
+    # Parchalanish: (o'qituvchi, guruh, kun) uchliklari kam bo'lsin — ya'ni
+    # o'qituvchi kelganda 1 emas, 2 paradan o'tsin. Vazn `group_day_used`
+    # (kunlar to'la bo'lsin, vazn 1) dan biroz yuqori, lekin haftalik reja
+    # chetlanishidan (30) ancha past — akademik talab baribir ustun turadi.
+    # Vazn 12 (40 emas!) — markazda HAFTALIK REJA ustun turishi kerak
+    # (foydalanuvchi qoidasi: "haftalik cheklov markazda saqlanib qolishi
+    # kerak"). `central_dev` vazni 30, shuning uchun parchalanish jazosi
+    # undan PAST bo'lishi shart — aks holda solver haftalik rejani buzib
+    # bloklarni yiriklashtirishni afzal ko'rardi.
+    cen_tg_bools = [b for k, b in tg_day_bools.items()
+                    if not (tg_day_tasks[k] & regional_tasks)]
+    if cen_tg_bools:
+        phase_central.append(12 * sum(cen_tg_bools))
 
     # Har bosqich yechimi saqlab qo'yiladi — keyingi bosqich vaqt yetmay
     # yechimsiz qaytsa ham jadval yo'qolib ketmasligi uchun (`solver` obyektida
     # faqat OXIRGI solve natijasi turadi, muvaffaqiyatsiz bo'lsa o'qib bo'lmaydi).
-    solution: dict[tuple, int] = {}
-    if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        solution = {k: solver.value(v) for k, v in x.items()}
+    # (1-bosqichda bir necha urinish bo'lishi mumkin — `solver` obyektida faqat
+    # OXIRGISI turadi, shuning uchun ENG YAXSHI yechim alohida saqlangan.)
+    solution: dict[tuple, int] = dict(phase1_solution)
 
     phase_log: list[str] = [_phase1_note]
 
@@ -1961,6 +2277,21 @@ def generate_schedule(
         model.add(total_placed_expr >= best_placed)
 
     remaining = max(5.0, time_limit_seconds - phase1_time)
+
+    # ── MARKAZ UCHUN BUDJETNI OLDINDAN AJRATISH ──────────────────────────────
+    # **Haqiqiy muammo (o'lchangan)**: viloyat bosqichlari `remaining` ni
+    # ketma-ket foizlab bo'lib olardi (`* 0.5`, `* 0.55`, ...) va oxirgi MARKAZ
+    # bosqichiga faqat 5 soniyalik quyi chegara qolardi ("MARKAZ: FEASIBLE 11s"
+    # 300 soniyalik limitda). Holbuki 19 guruhdan 13 tasi aynan MARKAZda va
+    # parchalanishga qarshi jazo ham o'sha bosqichda — ya'ni eng ko'p guruhga
+    # ta'sir qiladigan maqsad amalda umuman optimallashtirilmasdi.
+    #
+    # Endi markaz ulushi OLDINDAN chetga olinadi va viloyat bosqichlari faqat
+    # o'z ulushini bo'ladi. Viloyat ustuvorligi saqlanadi (u baribir birinchi
+    # ishlaydi va natijasi `_freeze` bilan qotiriladi), lekin markazni butunlay
+    # ochlikda qoldirmaydi.
+    central_budget = max(5.0, remaining * 0.35)
+    remaining = max(5.0, remaining - central_budget)
 
     # ── 8b–8e. TO'RT BOSQICH (foydalanuvchi belgilagan ustuvorlik tartibi) ───
     # **Nega bosqichma-bosqich va QOTIRISH bilan (o'lchangan)**: barcha
@@ -2120,17 +2451,25 @@ def generate_schedule(
         if reg_span_now:
             model.add(span_expr <= reg_span_now)
 
+    # VILOYAT bosqichi ilgari `remaining * 0.8` olardi — natijada oxirgi
+    # MARKAZ bosqichiga faqat 5 soniyalik quyi chegara qolar edi (o'lchangan:
+    # "MARKAZ: FEASIBLE 5s"). MARKAZda esa 13 guruh (viloyatda atigi 5) va
+    # aynan parchalanishga qarshi jazo turadi — ya'ni eng ko'p guruhga
+    # ta'sir qiladigan maqsad amalda umuman optimallashtirilmasdi.
     t = _run_phase('VILOYAT', phase_regional, remaining * 0.8)
     remaining = max(5.0, remaining - t)
     _freeze(regional_tasks)
 
+    # Viloyat bosqichlaridan ortgan vaqt ham markazga qo'shiladi
+    central_budget += remaining
+
     # 3-bosqich: boshqa binolardagi ko'chma darslar
-    t = _run_phase("KO'CHMA-MARKAZ", phase_field_cen, remaining * 0.3)
-    remaining = max(5.0, remaining - t)
+    t = _run_phase("KO'CHMA-MARKAZ", phase_field_cen, central_budget * 0.2)
+    central_budget = max(5.0, central_budget - t)
     _freeze(field_central)
 
-    # 4-bosqich: boshqa binolardagi qolgan darslar
-    _run_phase('MARKAZ', phase_central, remaining)
+    # 4-bosqich: boshqa binolardagi qolgan darslar (parchalanish jazosi shu yerda)
+    _run_phase('MARKAZ', phase_central, central_budget)
 
     if not solution:
         return {
@@ -2155,6 +2494,38 @@ def generate_schedule(
     entries: list[ScheduleEntry] = []
     total_placed = 0
 
+    # ── NAZARIY / AMALIY BELGISINI QO'YISH ───────────────────────────────────
+    # Auditoriya vazifasi solverga BITTA vazifa sifatida berilgan (nazariy +
+    # amaliy soatlar birga). Endi uning joylashgan paralari VAQT BO'YICHA
+    # tartiblanadi va birinchi `task.lec_paras` tasi "nazariy", qolgani
+    # "amaliy" deb belgilanadi.
+    #
+    # Shu tufayli "avval nazariy, keyin amaliy" tartibi QURILISHI BO'YICHA
+    # to'g'ri chiqadi — CP-SAT cheklovi kerak emas. Qo'lda tuzilgan haqiqiy
+    # jadvalda ham aynan shunday: 84 (guruh × fan) juftlikning 84 tasida
+    # global tartib saqlangan, 36 tasida esa nazariy bilan amaliy bir kunda
+    # uchraydi (o'tish kunida "NA" naqshi) — bu yondashuv ikkalasini ham
+    # tabiiy ravishda beradi.
+    #
+    # Vaqt tartibi `(sana, para.order)` bo'yicha — `para_id` bo'yicha EMAS,
+    # chunki turli smenalarda para_id vaqt tartibiga mos kelishi kafolatlanmagan.
+    lesson_type_by_key: dict[tuple, str] = {}
+    _placed_by_task: defaultdict[int, list] = defaultdict(list)
+    for (ti_, si_), placed_ in solution.items():
+        if placed_ == 1:
+            _placed_by_task[ti_].append(si_)
+
+    for ti_, si_list in _placed_by_task.items():
+        t_ = tasks[ti_]
+        if t_.is_field or t_.lec_paras <= 0:
+            continue          # ko'chma yoki sof amaliy — belgi o'zgarmaydi
+        si_list.sort(key=lambda s_: (slots[s_].date,
+                                     para_by_id[slots[s_].para_id].order))
+        for pos, s_ in enumerate(si_list):
+            lesson_type_by_key[(ti_, s_)] = (
+                'lecture' if pos < t_.lec_paras else 'practice'
+            )
+
     for (ti, si), placed in solution.items():
         if placed != 1:
             continue
@@ -2175,11 +2546,16 @@ def generate_schedule(
         #   - KO'CHMA MASHG'ULOT (`is_field`): tinglovchilar tashqariga chiqib
         #     amaliyot qiladi, ularga bino ichidan xona ajratish kerak emas
         #     (foydalanuvchi talabi)
+        # Yakuniy dars turi — `lesson_type_by_key` da bo'lsa o'sha (auditoriya
+        # vazifasi nazariy/amaliyga bo'lingan), aks holda vazifaning o'z turi
+        # (ko'chma yoki sof nazariy/sof amaliy fanlar).
+        final_lesson_type = lesson_type_by_key.get((ti, si), task.room_type)
+
         room = None
         if not task.is_online and not task.is_field:
             room = _select_room(
                 building_id=building_id,
-                lesson_type=task.room_type,
+                lesson_type=final_lesson_type,
                 min_capacity=capacity,
                 used_room_ids=used_rooms[(slot.date, slot.para_id)],
                 requires_computer_room=task.requires_computer_room,
@@ -2200,7 +2576,7 @@ def generate_schedule(
             teacher_id=task.teacher_id,
             group_id=task.group_id,
             subject_id=task.subject_id or None,
-            lesson_type=task.room_type,
+            lesson_type=final_lesson_type,
             room=room,
             building_id=building_id,
             is_online=task.is_online,

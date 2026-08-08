@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 from django.utils import timezone
 
@@ -330,6 +332,14 @@ class Group(models.Model):
         verbose_name="Yo'nalish",
         related_name='groups'
     )
+    # KPI tizimi bilan bog'lash uchun barqaror tashqi identifikator.
+    # Nega UUID, oddiy `id` emas: `id` faqat SHU bazada ma'noli — baza qayta
+    # tiklansa yoki boshqa tashkilot qo'shilsa raqamlar ustma-ust tushishi
+    # mumkin. UUID esa global unikal va o'zgarmaydi.
+    external_code = models.UUIDField(
+        default=uuid.uuid4, editable=False, unique=True, db_index=True,
+        verbose_name="Tashqi kod (integratsiya)"
+    )
     name          = models.CharField(max_length=100, verbose_name="Guruh nomi")
     student_count = models.PositiveIntegerField(default=0, verbose_name="Talabalar soni")
     month         = models.IntegerField(choices=Month.choices, verbose_name="Oy", null=True, blank=True)
@@ -369,6 +379,14 @@ class Shift(models.Model):
     Masalan: Ertalabki (08:00-14:00), Kunduzi (14:00-20:00)
     """
     organization = models.ForeignKey('organizations.Organization', on_delete=models.CASCADE, related_name='shifts')
+    # KPI tizimi bilan bog'lash uchun barqaror tashqi identifikator.
+    # Nega UUID, oddiy `id` emas: `id` faqat SHU bazada ma'noli — baza qayta
+    # tiklansa yoki boshqa tashkilot qo'shilsa raqamlar ustma-ust tushishi
+    # mumkin. UUID esa global unikal va o'zgarmaydi.
+    external_code = models.UUIDField(
+        default=uuid.uuid4, editable=False, unique=True, db_index=True,
+        verbose_name="Tashqi kod (integratsiya)"
+    )
     name         = models.CharField(max_length=100, verbose_name="Smena nomi")
     start_time   = models.TimeField(verbose_name="Boshlanish vaqti")
     end_time     = models.TimeField(verbose_name="Tugash vaqti")

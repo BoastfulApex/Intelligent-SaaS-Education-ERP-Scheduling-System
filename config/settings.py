@@ -96,6 +96,15 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    # Integratsiya endpointlari uchun tezlik chegarasi — tashqi tizim
+    # xato tsiklga tushib qolsa bazani bo'g'ib qo'ymasligi uchun.
+    'EXCEPTION_HANDLER': 'config.exception_handler.exception_handler',
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.ScopedRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'integration': '60/min',
+    },
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
         'rest_framework.filters.SearchFilter',

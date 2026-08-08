@@ -4,7 +4,7 @@ from .views import (TeacherViewSet, TeacherBusyTimeViewSet,
                     TeacherSubjectAssignmentViewSet, TeacherMonthlyLoadViewSet,
                     ScheduleViewSet, ScheduleEntryViewSet,
                     SubstitutionViewSet, AuditLogViewSet,
-                    LoadSheetViewSet)
+                    LoadSheetViewSet, LessonJournalViewSet)
 
 router = DefaultRouter()
 router.register(r'teachers', TeacherViewSet, basename='teacher')
@@ -16,6 +16,7 @@ router.register(r'schedule-entries', ScheduleEntryViewSet, basename='schedule-en
 router.register(r'substitutions', SubstitutionViewSet, basename='substitution')
 router.register(r'audit-logs', AuditLogViewSet, basename='auditlog')
 router.register(r'load-sheets', LoadSheetViewSet, basename='load-sheet')
+router.register(r'lesson-journal', LessonJournalViewSet, basename='lesson-journal')
 
 urlpatterns = [
     path('', include(router.urls)),

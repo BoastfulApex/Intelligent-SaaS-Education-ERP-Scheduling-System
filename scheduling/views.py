@@ -36,13 +36,65 @@ from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
                      Substitution, AuditLog,
                      LoadSheet, TeacherLoad, LoadDistribution,
-                     GroupSubject)
+                     GroupSubject, LessonJournal)
 from .serializers import (TeacherSerializer, TeacherBusyTimeSerializer,
                            TeacherSubjectAssignmentSerializer,
                            TeacherMonthlyLoadSerializer, ScheduleSerializer,
                            ScheduleEntrySerializer, SubstitutionSerializer,
                            AuditLogSerializer,
-                           LoadSheetSerializer)
+                           LoadSheetSerializer, LessonJournalSerializer)
+
+
+def _sync_lesson_journal(entries):
+    """
+    `ScheduleEntry.objects.bulk_create(entries)`dan KEYIN chaqiriladi
+    (`ScheduleViewSet.generate`, `_run()`) — har bir (teacher, group, subject,
+    para, date) juftligi uchun mos `LessonJournal` yozuvini topadi yoki
+    yaratadi va uni yangi `ScheduleEntry`ga qayta bog'laydi.
+
+    Nega `bulk_create`dan keyin: solver yaratgan `ScheduleEntry` obyektlari
+    (`solver.py`) da `teacher_id`/`group_id`/`subject_id`/`para_id`/`date`
+    allaqachon to'g'ridan-to'g'ri mavjud, qo'shimcha so'rov kerak emas.
+    `entries`dagi `id` esa faqat `bulk_create()` chaqirilgach to'ladi
+    (PostgreSQL — Django avtomatik `RETURNING id` qiladi).
+
+    Vakant (`teacher_id=None`) darslar uchun jurnal yaratilmaydi — jurnalni
+    to'ldiradigan haqiqiy odam yo'q.
+    """
+    seen = {}
+    for en in entries:
+        if not en.teacher_id:
+            continue
+        key = (en.teacher_id, en.group_id, en.subject_id, en.para_id, en.date)
+        seen[key] = en
+    if not seen:
+        return
+
+    teacher_ids = {k[0] for k in seen}
+    dates = {k[4] for k in seen}
+    existing = {
+        (j.teacher_id, j.group_id, j.subject_id, j.para_id, j.date): j
+        for j in LessonJournal.objects.filter(teacher_id__in=teacher_ids, date__in=dates)
+    }
+
+    to_create, to_update = [], []
+    for key, en in seen.items():
+        j = existing.get(key)
+        if j is None:
+            to_create.append(LessonJournal(
+                teacher_id=en.teacher_id, group_id=en.group_id,
+                subject_id=en.subject_id, para_id=en.para_id, date=en.date,
+                lesson_type=en.lesson_type, schedule_entry=en,
+            ))
+        elif j.schedule_entry_id != en.id or j.lesson_type != en.lesson_type:
+            j.schedule_entry = en
+            j.lesson_type = en.lesson_type
+            to_update.append(j)
+
+    if to_create:
+        LessonJournal.objects.bulk_create(to_create, ignore_conflicts=True)
+    if to_update:
+        LessonJournal.objects.bulk_update(to_update, ['schedule_entry', 'lesson_type'])
 from academic.models import Para, GroupAssignment, Group, CurriculumSubject, Curriculum, DeliveryMode
 from organizations.models import Room, Department
 
@@ -896,6 +948,7 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                 with transaction.atomic():
                     if entries:
                         ScheduleEntry.objects.bulk_create(entries)
+                        _sync_lesson_journal(entries)
                     Schedule.objects.filter(pk=sch_id).update(
                         gen_status=Schedule.GenStatus.DONE,
                         gen_percent=100,
@@ -1463,6 +1516,48 @@ class ScheduleEntryViewSet(viewsets.ModelViewSet):
         if v := p.get('date_from'):   qs = qs.filter(date__gte=v)
         if v := p.get('date_to'):     qs = qs.filter(date__lte=v)
         return qs
+
+
+class LessonJournalViewSet(viewsets.ModelViewSet):
+    """
+    O'qituvchi shaxsiy jurnal sahifasi — faqat O'ZINING yozuvlarini ko'radi
+    va faqat `topic` (o'tilgan mavzu) maydonini to'ldiradi. Yaratish/o'chirish
+    yo'q — yozuvlar `_sync_lesson_journal` orqali generatsiya vaqtida
+    avtomatik paydo bo'ladi (`views.py` yuqorisiga qarang).
+
+    GET /lesson-journal/today/ — bugungi darslar, para vaqti bo'yicha
+    tartiblangan, `is_current` bayrog'i bilan (joriy vaqtga to'g'ri keluvchi
+    para).
+    """
+    serializer_class   = LessonJournalSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names  = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        teacher = getattr(self.request.user, 'teacher_profile', None)
+        if not teacher:
+            return LessonJournal.objects.none()
+        qs = (
+            LessonJournal.objects
+            .filter(teacher=teacher)
+            .select_related('group', 'subject', 'para')
+        )
+        p = self.request.query_params
+        if v := p.get('date'):      qs = qs.filter(date=v)
+        if v := p.get('date_from'): qs = qs.filter(date__gte=v)
+        if v := p.get('date_to'):   qs = qs.filter(date__lte=v)
+        return qs
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['now'] = timezone.localtime().time()
+        return ctx
+
+    @action(detail=False, methods=['get'], url_path='today')
+    def today(self, request):
+        today = timezone.localdate()
+        qs = self.get_queryset().filter(date=today).order_by('para__start_time')
+        return Response(self.get_serializer(qs, many=True).data)
 
 
 class SubstitutionViewSet(viewsets.ModelViewSet):

@@ -1,7 +1,8 @@
+from django.utils import timezone
 from rest_framework import serializers
 from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
-                     Substitution, AuditLog,
+                     Substitution, AuditLog, LessonJournal,
                      LoadSheet, TeacherLoad, LoadDistribution)
 
 
@@ -161,6 +162,51 @@ class ScheduleEntrySerializer(serializers.ModelSerializer):
 
     def get_lesson_type_display(self, obj):
         return 'Nazariy' if obj.lesson_type == 'lecture' else 'Amaliy'
+
+
+class LessonJournalSerializer(serializers.ModelSerializer):
+    group_name      = serializers.CharField(source='group.name', read_only=True)
+    subject_name    = serializers.CharField(source='subject.name', read_only=True)
+    para_name       = serializers.CharField(source='para.name', read_only=True)
+    start_time      = serializers.TimeField(source='para.start_time', read_only=True)
+    end_time        = serializers.TimeField(source='para.end_time', read_only=True)
+    lesson_type_display = serializers.CharField(source='get_lesson_type_display', read_only=True)
+    status_display  = serializers.CharField(source='get_status_display', read_only=True)
+    # `now` view'ning `get_serializer_context()`idan keladi — bu yerda hisoblanmaydi,
+    # chunki serializer sana/vaqt bilishi shart emas, faqat context orqali oladi
+    is_current      = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LessonJournal
+        fields = ['id', 'group', 'group_name', 'subject', 'subject_name',
+                  'para', 'para_name', 'start_time', 'end_time', 'date',
+                  'lesson_type', 'lesson_type_display', 'topic', 'status',
+                  'status_display', 'filled_at', 'is_current']
+        # `topic` — bitta yozuvchi maydon: o'qituvchi FAQAT mavzuni kiritadi,
+        # qolgan hammasi (guruh/fan/para/sana/holat) `_sync_lesson_journal`
+        # orqali generatsiya vaqtida avtomatik to'ldiriladi, qo'lda o'zgartirib
+        # bo'lmaydi (aks holda o'qituvchi jurnalni soxtalashtira olardi).
+        read_only_fields = ['id', 'group', 'subject', 'para', 'date',
+                            'lesson_type', 'status', 'filled_at']
+
+    def get_is_current(self, obj):
+        now = self.context.get('now')
+        if not now:
+            return False
+        return obj.para.start_time <= now <= obj.para.end_time
+
+    def update(self, instance, validated_data):
+        if 'topic' in validated_data:
+            topic = validated_data['topic']
+            instance.topic = topic
+            if topic.strip():
+                instance.status = LessonJournal.Status.DONE
+                instance.filled_at = timezone.now()
+            else:
+                instance.status = LessonJournal.Status.PLANNED
+                instance.filled_at = None
+            instance.save(update_fields=['topic', 'status', 'filled_at', 'updated_at'])
+        return instance
 
 
 class ScheduleSerializer(serializers.ModelSerializer):

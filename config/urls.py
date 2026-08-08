@@ -18,6 +18,8 @@ urlpatterns = [
     path('api/v1/', include('academic.urls')),
     path('api/v1/', include('scheduling.urls')),
     path('api/v1/', include('reports.urls')),
+    # KPI (EEMSportedu) integratsiyasi — API kalit bilan, JWT emas
+    path('api/v1/', include('academic.integration_urls')),
 
     # API Dokumentatsiya
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
