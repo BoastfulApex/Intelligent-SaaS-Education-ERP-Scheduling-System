@@ -87,6 +87,47 @@ class IntegrationGroupsAPIView(APIView):
         return Response({'count': len(results), 'results': results})
 
 
+class IntegrationBuildingsAPIView(APIView):
+    """
+    GET /api/v1/integration/buildings/
+
+    Tashkilotning BARCHA faol binolari — oy/yilga BOG'LIQ EMAS.
+
+    **Nega alohida, `day-assignments` ichidagi `buildings`dan farqli**:
+    lokatsiya moslashtirish (LMS bino <-> KPI Location, GPS bo'yicha) bir
+    martalik, vaqtga bog'liq bo'lmagan ish — "bu bino qaysi oyda ishlatilgan"
+    degan savolga aloqasi yo'q. Avval `day-assignments`dagi `buildings`
+    (faqat SHU OYDA ishlatilganlar) orqali moslashtirilgan edi — bu amalda
+    xato edi: agar joriy kalendar oyida hech qanday kunlik biriktiruv
+    bo'lmasa (masalan test ma'lumoti boshqa oyda), moslashtirish sahifasi
+    "bino topilmadi" ko'rsatardi, garchi binolarning o'zi allaqachon LMS'da
+    mavjud bo'lsa ham.
+
+    Oqim endi ikkiga bo'lingan:
+      1. Moslashtirish — SHU endpoint (butun ro'yxat, oyga bog'liq emas)
+      2. Kunlik import — `day-assignments`, bino KODINI qaytaradi, KPI esa
+         allaqachon (1-qadamda) saqlangan `lms_building_code` orqali mos
+         `Location`ni topadi
+    """
+    authentication_classes = []
+    permission_classes = [HasIntegrationScope]
+    required_scope = 'schedule:read'
+    throttle_scope = 'integration'
+
+    def get(self, request):
+        org = request.integration_client.organization
+        qs = (Building.objects
+              .filter(organization=org, is_active=True)
+              .order_by('name'))
+        results = [{
+            'code': str(b.external_code),
+            'name': b.name,
+            'address': b.address or '',
+            'is_regional': b.is_regional,
+        } for b in qs]
+        return Response({'count': len(results), 'results': results})
+
+
 class IntegrationDayAssignmentsAPIView(APIView):
     """
     GET /api/v1/integration/day-assignments/?year=2026&month=9
