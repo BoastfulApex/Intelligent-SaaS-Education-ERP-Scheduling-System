@@ -378,6 +378,55 @@ class UserViewSet(viewsets.ModelViewSet):
             'errors':  errors,
         }, status=status.HTTP_201_CREATED)
 
+    @action(detail=False, methods=['post'], url_path='bulk-reset-password',
+            permission_classes=[IsOrgAdmin])
+    def bulk_reset_password(self, request):
+        """
+        POST /api/v1/users/bulk-reset-password/
+        Body: {"user_ids": [1, 2, 3]}
+
+        Tanlangan foydalanuvchilar uchun YANGI tasodifiy parol generatsiya
+        qiladi va bazaga XESHLAB saqlaydi (`set_password`). Plaintext parol
+        FAQAT shu javobda, bir marta qaytadi — `upload_teachers` bilan bir
+        xil naqsh (shu faylda yuqorida). Bazada ochiq saqlanmaydi — agar
+        keyinroq baza sizib chiqsa, hech qanday joriy parol tiklanmasin
+        degan ataylab qilingan xavfsizlik chegarasi.
+
+        Faqat SO'ROVCHI TASHKILOTIGA tegishli foydalanuvchilar o'zgartiriladi
+        — boshqa tashkilot foydalanuvchisi ID'si yuborilsa, jimgina
+        o'tkazib yuboriladi (xato emas, lekin natijada ko'rinmaydi).
+        """
+        user_ids = request.data.get('user_ids')
+        if not isinstance(user_ids, list) or not user_ids:
+            return Response({'error': "user_ids ro'yxati kerak."}, status=400)
+
+        users = User.objects.filter(
+            id__in=user_ids, organization=request.user.organization,
+        )
+
+        import random, string
+        def _make_password():
+            chars = string.ascii_letters + string.digits
+            return ''.join(random.choices(chars, k=8))
+
+        results = []
+        for user in users:
+            password = _make_password()
+            user.set_password(password)
+            user.save(update_fields=['password'])
+            results.append({
+                'id': user.id,
+                'username': user.username,
+                'last_name': user.last_name,
+                'first_name': user.first_name,
+                'password': password,
+            })
+
+        return Response({
+            'message': f"{len(results)} ta foydalanuvchi uchun yangi parol yaratildi.",
+            'results': results,
+        })
+
     @action(detail=False, methods=['post'], url_path='change-password',
             permission_classes=[IsAuthenticated])
     def change_password(self, request):
