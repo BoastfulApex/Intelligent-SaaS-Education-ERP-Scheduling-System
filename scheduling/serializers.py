@@ -190,8 +190,14 @@ class LessonJournalSerializer(serializers.ModelSerializer):
                             'lesson_type', 'status', 'filled_at']
 
     def get_is_current(self, obj):
+        # `date` context — chunki bu serializer endi faqat bugungi kun uchun
+        # emas, istalgan sana uchun ishlatiladi (`days` navigatsiyasi orqali).
+        # Faqat VAQT solishtirilsa, boshqa kundagi para joriy vaqt oralig'iga
+        # tasodifan to'g'ri kelib qolsa, "Hozir" nishoni NOTO'G'RI chiqib
+        # qolardi (haqiqiy xato, shu yerda topilgan).
         now = self.context.get('now')
-        if not now:
+        today = self.context.get('today')
+        if not now or not today or obj.date != today:
             return False
         return obj.para.start_time <= now <= obj.para.end_time
 

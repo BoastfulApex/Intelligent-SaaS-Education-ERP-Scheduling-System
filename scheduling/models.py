@@ -481,6 +481,52 @@ class LessonJournal(models.Model):
         return f"{self.date} | {self.teacher} | {self.group} | {self.subject}"
 
 
+class LessonAttendance(models.Model):
+    """
+    KPI (EEMSportedu, yuz-ID + GPS orqali) qayd qilingan xom davomat
+    faktiga asoslanib, O'QITUVCHI TASDIQLAGAN yo'qlama — bitta
+    (LessonJournal, tinglovchi) juftligi.
+
+    **Muhim arxitektura qarori — nega KUN darajasida emas, PARA darajasida
+    saqlanadi**: KPI'ning `attendance` endpointi (INTEGRATION_LMS.md 6-bo'lim)
+    tinglovchiga bir kunda BITTA check-in vaqti beradi — para darajasida
+    emas. Agar guruhda bir kunda bir necha para bo'lsa, xuddi shu KPI
+    ma'lumoti barcha paralar uchun bir xil ko'rsatiladi (`checked_in_kpi`,
+    `check_in_time` — xom, KPI'dan olingan fakt sifatida), LEKIN har bir
+    para uchun `marked_present` ALOHIDA saqlanadi — chunki tinglovchi
+    kunning yarmida ketib qolgan yoki kech kelgan bo'lishi mumkin, buni
+    faqat o'qituvchining o'zi bila oladi. Shuning uchun bu model
+    `LessonJournal`ga (ya'ni aniq para+sana+guruhga) bog'lanadi, `Group`ga
+    yoki sanaga emas.
+
+    `LessonJournal` kabi, `Schedule.generate` qayta chaqirilganda
+    `LessonJournal` yozuvi saqlanib qoladi (`_sync_lesson_journal`), shuning
+    uchun bu yerdagi ma'lumot ham yo'qolmaydi — `journal` FK CASCADE bo'lsa
+    ham, `LessonJournal`ning o'zi generatsiya paytida o'chirilmaydi.
+    """
+    journal = models.ForeignKey(
+        LessonJournal, on_delete=models.CASCADE,
+        related_name='attendance_records', verbose_name="Dars jurnali"
+    )
+    kpi_student_id = models.PositiveIntegerField(verbose_name="KPI tinglovchi ID")
+    full_name       = models.CharField(max_length=255, verbose_name="F.I.Sh.")
+    # Xom KPI fakti — faqat ma'lumot uchun, o'qituvchi qarorini almashtirmaydi
+    checked_in_kpi  = models.BooleanField(default=False, verbose_name="KPI'da qayd (xom fakt)")
+    check_in_time   = models.TimeField(null=True, blank=True)
+    # Haqiqiy natija — davomat hisobotlarida ISHLATILADIGAN yagona maydon
+    marked_present  = models.BooleanField(default=False, verbose_name="O'qituvchi tasdiqlagan")
+    marked_at       = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'lesson_attendance'
+        verbose_name = "Davomat"
+        verbose_name_plural = "Davomat"
+        unique_together = ['journal', 'kpi_student_id']
+
+    def __str__(self):
+        return f"{self.full_name} — {self.journal}"
+
+
 class Substitution(models.Model):
     """
     O'rinbosarlik — o'qituvchi kela olmasa

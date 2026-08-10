@@ -10,6 +10,13 @@ if env_file.exists():
     environ.Env.read_env(env_file)
 
 SECRET_KEY = env('SECRET_KEY')
+
+# KPI (EEMSportedu) integratsiyasi — davomatni o'qish uchun (scheduling/kpi_client.py).
+# Kalitni KPI tomoni `create_integration_key --scopes attendance:read` bilan
+# yaratadi; bu yerga qo'yishdan oldin kodga qattiq yozmang, faqat .env orqali.
+KPI_BASE_URL = env('KPI_BASE_URL', default='')
+KPI_API_KEY  = env('KPI_API_KEY', default='')
+KPI_TIMEOUT  = env.int('KPI_TIMEOUT', default=15)
 DEBUG = env.bool('DEBUG', default=True)
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['*'])
 

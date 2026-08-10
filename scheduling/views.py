@@ -36,7 +36,8 @@ from .models import (Teacher, TeacherBusyTime, TeacherSubjectAssignment,
                      TeacherMonthlyLoad, Schedule, ScheduleEntry,
                      Substitution, AuditLog,
                      LoadSheet, TeacherLoad, LoadDistribution,
-                     GroupSubject, LessonJournal)
+                     GroupSubject, LessonJournal, LessonAttendance)
+from .kpi_client import fetch_attendance, KPIError
 from .serializers import (TeacherSerializer, TeacherBusyTimeSerializer,
                            TeacherSubjectAssignmentSerializer,
                            TeacherMonthlyLoadSerializer, ScheduleSerializer,
@@ -1531,7 +1532,13 @@ class LessonJournalViewSet(viewsets.ModelViewSet):
     """
     serializer_class   = LessonJournalSerializer
     permission_classes = [IsAuthenticated]
-    http_method_names  = ['get', 'patch', 'head', 'options']
+    # 'post' SHART — `attendance` action'i POST qabul qiladi. Bu yerda
+    # `LoadSheetViewSet`da avval uchragan bug bilan bir xil turkum
+    # (`load-sheet-teacher-assignment.md`): `http_method_names` butun
+    # ViewSet darajasida ishlaydi, `@action(methods=['get','post'])`
+    # dekoratoridagi qiymatni E'TIBORGA OLMAYDI agar shu ro'yxatda 'post'
+    # bo'lmasa — natijada 405 qaytaradi.
+    http_method_names  = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
         teacher = getattr(self.request.user, 'teacher_profile', None)
@@ -1551,6 +1558,7 @@ class LessonJournalViewSet(viewsets.ModelViewSet):
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx['now'] = timezone.localtime().time()
+        ctx['today'] = timezone.localdate()
         return ctx
 
     @action(detail=False, methods=['get'], url_path='today')
@@ -1558,6 +1566,111 @@ class LessonJournalViewSet(viewsets.ModelViewSet):
         today = timezone.localdate()
         qs = self.get_queryset().filter(date=today).order_by('para__start_time')
         return Response(self.get_serializer(qs, many=True).data)
+
+    @action(detail=False, methods=['get'], url_path='days')
+    def days(self, request):
+        """O'qituvchining darsi bor SANALAR ro'yxati (kalendar navigatsiyasi
+        uchun) — `?month=9&year=2026`. Berilmasa joriy oy olinadi.
+        Faqat sana + shu kundagi dars soni qaytadi, to'liq ma'lumot emas —
+        `today`/`?date=` orqali alohida so'raladi."""
+        today = timezone.localdate()
+        year = int(request.query_params.get('year') or today.year)
+        month = int(request.query_params.get('month') or today.month)
+        qs = (self.get_queryset()
+              .filter(date__year=year, date__month=month)
+              .values('date').annotate(count=Count('id')).order_by('date'))
+        return Response(list(qs))
+
+    @action(detail=True, methods=['get', 'post'], url_path='attendance')
+    def attendance(self, request, pk=None):
+        """
+        GET  — KPI'dan (yuz-ID + GPS) jonli davomat faktini oladi, oldin
+               saqlangan o'qituvchi tasdig'i bilan birlashtirib qaytaradi.
+        POST — o'qituvchi tasdiqlagan yakuniy ro'yxatni saqlaydi
+               (`present_ids`). Faqat dars sanasi hali TUGAMAGAN bo'lsa
+               ishlaydi (foydalanuvchi qoidasi: "yo'qlamani qayd qilish
+               faqat para o'tilishi kerak kunni oxirigacha aktiv").
+
+        Ikkalasida ham KPI'ga so'rov yuboriladi — POST'da klient yuborgan
+        `checked_in`/`check_in_time` emas, HAR DOIM KPI'dan qayta olingan
+        qiymat saqlanadi. Faqat `marked_present` (o'qituvchining qarori)
+        klientdan keladi — aks holda klient xom faktni ham soxtalashtira
+        olardi.
+        """
+        journal = self.get_object()
+        group = journal.group
+
+        if not group.external_code:
+            return Response(
+                {'error': "Bu guruh KPI bilan bog'lanmagan (LMS'dan hali "
+                          "import qilinmagan bo'lishi mumkin)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        editable = timezone.localdate() <= journal.date
+
+        if request.method == 'POST':
+            if not editable:
+                return Response(
+                    {'error': "Bu dars sanasi uchun yo'qlama muddati tugagan "
+                              "— faqat shu kun ichida belgilash mumkin."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            present_ids = request.data.get('present_ids')
+            if not isinstance(present_ids, list):
+                return Response({'error': "present_ids ro'yxati kerak."},
+                               status=status.HTTP_400_BAD_REQUEST)
+            present_ids = {int(i) for i in present_ids}
+
+            try:
+                data = fetch_attendance(group.external_code, journal.date)
+            except KPIError as e:
+                return Response({'error': str(e)},
+                               status=status.HTTP_502_BAD_GATEWAY)
+
+            now = timezone.now()
+            for s in data.get('students', []):
+                LessonAttendance.objects.update_or_create(
+                    journal=journal, kpi_student_id=s['id'],
+                    defaults={
+                        'full_name': (s.get('full_name') or '')[:255],
+                        'checked_in_kpi': bool(s.get('checked_in')),
+                        'check_in_time': s.get('check_in_time') or None,
+                        'marked_present': s['id'] in present_ids,
+                        'marked_at': now,
+                    },
+                )
+            return Response({'saved': True})
+
+        # GET
+        try:
+            data = fetch_attendance(group.external_code, journal.date)
+        except KPIError as e:
+            return Response({'error': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        saved = {a.kpi_student_id: a for a in journal.attendance_records.all()}
+        students = []
+        for s in data.get('students', []):
+            rec = saved.get(s['id'])
+            students.append({
+                'id': s['id'],
+                'full_name': s['full_name'],
+                'checked_in': s['checked_in'],
+                'check_in_time': s.get('check_in_time'),
+                'building': s.get('building'),
+                'late_minutes': s.get('late_minutes', 0),
+                # O'qituvchi hali hech narsa tasdiqlamagan bo'lsa, KPI
+                # faktiga qarab boshlang'ich holat TAKLIF qilinadi (checked_in
+                # -> present) — bu faqat UI'dagi default, saqlanmaguncha
+                # yakuniy qaror emas.
+                'marked_present': rec.marked_present if rec else bool(s['checked_in']),
+            })
+        return Response({
+            'group_name': data.get('group_name', group.name),
+            'date': journal.date.isoformat(),
+            'editable': editable,
+            'students': students,
+        })
 
 
 class SubstitutionViewSet(viewsets.ModelViewSet):
