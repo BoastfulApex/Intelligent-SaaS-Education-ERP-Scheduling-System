@@ -91,7 +91,11 @@ DEPT_WINDOW_SLACK = 2
 # Bir kunda viloyatda bo'lishi mumkin bo'lgan o'qituvchilar soni — o'sha kuni
 # viloyatda dars oladigan GURUHLAR soniga qo'shiladigan zaxira (foydalanuvchi
 # qoidasi 2: "nechta guruh bo'lsa n+2 ta o'qituvchi").
-REGIONAL_TEACHER_SLACK = 3
+# Foydalanuvchi QAROR O'ZGARTIRDI (2026-11-20): to'liq bo'sh kunsiz (24/24)
+# natijaga ustuvorlik berildi — n+3 buni bermaydi (21-23/24), n+4 beradi
+# (24/24, `REGIONAL_NO_GAP_WITHIN_DAY=False` bilan birga, 480s'da o'lchandi).
+# Evaziga bir kunda max o'qituvchi 8'dan 9'ga chiqadi.
+REGIONAL_TEACHER_SLACK = 4
 
 # Viloyatga kelgan o'qituvchi bir kunda kamida NECHTA para o'tishi shart.
 # 1 = QAT'IY qoida o'chirilgan (joriy holat), 2 = "1 para uchun kelmasin".
@@ -121,11 +125,13 @@ REGIONAL_TEACHER_SLACK = 3
 REGIONAL_MIN_PARAS_PER_DAY = 1
 
 # Viloyatda o'qituvchining KUN ICHIDA bo'sh parasi (teshigi) taqiqlansinmi.
-# True  = teshik 0% (qat'iy), lekin bo'sh KUNLAR biroz ko'payadi
-# False = teshik ~10-13% (qo'lda tuzilgan jadvalda ham 11%), bo'sh kun kamroq
-# Foydalanuvchi qarori: viloyatda bo'sh KUN bo'sh PARAdan qimmatroq
-# (komandirovkada ortiqcha kun = yo'l + turar joy), shuning uchun kun ustuvor.
-REGIONAL_NO_GAP_WITHIN_DAY = True
+# True  = teshik 0% (qat'iy), lekin bo'sh KUNLAR biroz ko'payadi (21-23/24)
+# False = teshik ~10-13% (qo'lda tuzilgan jadvalda ham 11%), bo'sh kunsiz 24/24
+# Foydalanuvchi QAROR O'ZGARTIRDI (2026-11-20): dastlab "bo'sh KUN bo'sh
+# PARAdan qimmatroq" deb True qilingan edi, lekin keyinroq to'liq bo'sh
+# kunsiz (24/24) natijaga ustuvorlik berildi — kun ichidagi teshiqqa yo'l
+# qo'yiladi. Batafsil: schedule-generation.md "24/24 vs Constraint 2c".
+REGIONAL_NO_GAP_WITHIN_DAY = False
 
 # VILOYAT bosqichida bitta (o'qituvchi, kun) — ya'ni komandirovka kuni —
 # uchun jazo vazni. Uni oshirish 1 paralik kunlarni kamaytiradi (kunlar
@@ -133,6 +139,14 @@ REGIONAL_NO_GAP_WITHIN_DAY = True
 # raqobatlashadi — juda katta qilinsa kunlar siyraklashib bo'shliq paydo
 # bo'lishi mumkin. O'lchab tanlanadi.
 REGIONAL_PRESENCE_WEIGHT = 150
+
+# Viloyat blok shanba kunidan boshlanishi kamaytirilsinmi. SINALDI VA
+# RAD ETILDI (batafsil schedule-generation.md) — real ma'lumotda 2 ta
+# shanba-boshlanish STRUKTURAVIY majburiy chiqdi (boshqa nomzod sig'madi,
+# qayta tartiblash ularni o'zgartirmadi), lekin boshqa o'qituvchilarning
+# greedy joylashuvini o'zgartirib yubordi (bo'sh kunsiz 22/24 -> 17/24).
+# False = o'chirilgan (joriy holat).
+REGIONAL_AVOID_SATURDAY_START = False
 
 # **SINALGAN VA RAD ETILGAN — "ikki safar"**: ko'chma + oddiy fani bor
 # o'qituvchi viloyatga ikki marta borsin (boshida oddiy darslar, uyga qaytadi,
@@ -1015,6 +1029,27 @@ def generate_schedule(
                                             hi_t - win_len + 1))]
                 else:
                     starts = range(lo_t, hi_t - win_len + 2)
+                    # **Foydalanuvchi qoidasi**: blok REAL kalendar SHANBADAN
+                    # boshlanmasin (win_len > 1 bo'lsa). Sabab: `reg_day_list`
+                    # faqat ISH kunlaridan iborat (`isoweekday() <= 6` —
+                    # yakshanba chetlatilgan), shuning uchun shanba va undan
+                    # keyingi dushanba bu ro'yxatda "ketma-ket" (indeks farqi
+                    # 1) ko'rinadi — garchi ular orasida HAQIQIY bir kunlik
+                    # tanaffus (yakshanba) bo'lsa ham. Bunday blok o'qituvchini
+                    # "shanba boradi — yakshanba bekor turadi (yoki uyga
+                    # qaytadi) — dushanbadan davom etadi" holatiga majbur
+                    # qiladi, bu haqiqiy noqulaylik.
+                    #
+                    # Yechim NOMZODLARNI CHIQARIB TASHLASH emas, balki qayta
+                    # TARTIBLASH — barcha nomzodlar saqlanadi (dars yo'qolish
+                    # xavfi yo'q), faqat shanbadan boshlanmaydiganlari birinchi
+                    # sinaladi. `False < True` bo'lgani uchun shanba=True
+                    # oxiriga suriladi.
+                    if win_len > 1 and REGIONAL_AVOID_SATURDAY_START:
+                        starts = sorted(
+                            starts,
+                            key=lambda s_: reg_day_list[s_].isoweekday() == 6,
+                        )
                 for s in starts:
                     e = s + win_len - 1
                     if s < lo_t or e > hi_t:
