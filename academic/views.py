@@ -15,6 +15,7 @@ from .serializers import (MajorSerializer, SubjectSerializer,
                            CurriculumSubjectSerializer, GroupSerializer,
                            ShiftSerializer, ParaSerializer,
                            GroupAssignmentSerializer, GroupDayAssignmentSerializer)
+from config.uploads import validate_upload
 from permissions import (
     IsEduAdmin, IsOrgAdmin, IsOrgAdminOrReadOnly, IsEduAdminOrReadOnly,
     IsEduAdminOrMethodist, IsEduAdminWriteMethodistRead,
@@ -531,11 +532,10 @@ class CurriculumViewSet(viewsets.ModelViewSet):
                 {'error': '"file" maydoni talab qilinadi.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not file.name.endswith(('.xlsx', '.xls')):
-            return Response(
-                {'error': 'Faqat .xlsx yoki .xls fayl qabul qilinadi.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        upload_err = validate_upload(file, ('.xlsx', '.xls'))
+        if upload_err:
+            return Response({'error': upload_err},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         major_id = request.data.get('major_id')
         if not major_id:

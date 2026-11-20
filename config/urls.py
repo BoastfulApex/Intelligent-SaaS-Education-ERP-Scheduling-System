@@ -1,16 +1,27 @@
+from django.conf import settings
 from django.contrib import admin
 from django.urls import path, include
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.views import TokenRefreshView
 from drf_spectacular.views import (
     SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 )
 
-urlpatterns = [
-    path('admin/', admin.site.urls),
+from accounts.auth_views import LogoutView, ThrottledTokenObtainPairView
 
-    # JWT Auth
-    path('api/auth/login/', TokenObtainPairView.as_view(), name='login'),
+# Admin manzili `.env` dagi `ADMIN_URL` orqali o'zgartiriladi (standart
+# `admin/` — topish oson va brute force uchun ochiq nishon). Bo'sh qiymat
+# berilsa, admin umuman ulanmaydi.
+ADMIN_URL = getattr(settings, 'ADMIN_URL', 'admin/')
+
+urlpatterns = []
+if ADMIN_URL:
+    urlpatterns.append(path(ADMIN_URL, admin.site.urls))
+
+urlpatterns += [
+    # JWT Auth — login'da brute force himoyasi bor (accounts/throttling.py)
+    path('api/auth/login/', ThrottledTokenObtainPairView.as_view(), name='login'),
     path('api/auth/refresh/', TokenRefreshView.as_view(), name='refresh'),
+    path('api/auth/logout/', LogoutView.as_view(), name='logout'),
 
     # Apps
     path('api/v1/', include('accounts.urls')),

@@ -7,6 +7,7 @@ from .models import User
 from .serializers import UserSerializer, UserCreateSerializer, ChangePasswordSerializer
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
+from config.uploads import validate_upload
 from permissions import IsOrgAdmin, IsDeptManager
 import pandas as pd
 import re
@@ -208,8 +209,9 @@ class UserViewSet(viewsets.ModelViewSet):
         file = request.FILES.get('file')
         if not file:
             return Response({'error': 'Fayl yuklanmadi'}, status=400)
-        if not file.name.endswith(('.xlsx', '.xls', '.csv')):
-            return Response({'error': 'Faqat .xlsx, .xls yoki .csv fayl'}, status=400)
+        upload_err = validate_upload(file, ('.xlsx', '.xls', '.csv'))
+        if upload_err:
+            return Response({'error': upload_err}, status=400)
 
         # Faylni o'qish — sarlavhasiz ham bo'lishi mumkin, shuning uchun header=None sinab ko'ramiz
         try:

@@ -98,6 +98,7 @@ def _sync_lesson_journal(entries):
         LessonJournal.objects.bulk_update(to_update, ['schedule_entry', 'lesson_type'])
 from academic.models import Para, GroupAssignment, Group, CurriculumSubject, Curriculum, DeliveryMode
 from organizations.models import Room, Department
+from config.uploads import validate_upload
 
 
 # ─── TAQSIMOT PARSER YORDAMCHI FUNKSIYALARI ───────────────────────────────────
@@ -1813,11 +1814,10 @@ class LoadSheetViewSet(viewsets.ModelViewSet):
                 {'error': 'Excel fayl yuklanmadi. "file" field talab qilinadi.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not file.name.endswith(('.xlsx', '.xls')):
-            return Response(
-                {'error': 'Faqat .xlsx yoki .xls formatdagi fayllar qabul qilinadi.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        upload_err = validate_upload(file, ('.xlsx', '.xls'))
+        if upload_err:
+            return Response({'error': upload_err},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
 
